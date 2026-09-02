@@ -1,6 +1,8 @@
 name: MAX Observer Test
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '*/30 * * * *'
 jobs:
   observer:
     runs-on: ubuntu-latest
