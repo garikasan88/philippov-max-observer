@@ -14,7 +14,7 @@ concurrency:
 jobs:
   observer:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 300
 
     steps:
       - uses: actions/checkout@v4
@@ -31,19 +31,19 @@ jobs:
           MAX_SESSION: ${{ secrets.MAX_SESSION }}
         run: printf '%s' "$MAX_SESSION" > .max-session.json
 
-      - name: Run MAX observer cycle
+      - name: One MAX check
         shell: bash
         run: |
-          set -u
+          set -euo pipefail
 
-          get_hour() {
-            TZ=Europe/Moscow date +%H
-          }
+          hour=$((10#$(TZ=Europe/Moscow date +%H)))
 
-          hour=$((10#$(get_hour)))
+          echo "МОСКОВСКОЕ ВРЕМЯ: $(TZ=Europe/Moscow date)"
 
           if (( hour >= 22 || hour < 6 )); then
+
             echo "НОЧНОЙ РЕЖИМ MAX: 22:00–06:00"
+            echo "MAX НЕ ПРОВЕРЯЕМ"
 
             now=$(TZ=Europe/Moscow date +%s)
 
@@ -55,48 +55,37 @@ jobs:
 
             wait_seconds=$((target - now))
 
-            # Один GitHub job не держим дольше 5 часов ожидания.
-            if (( wait_seconds > 18000 )); then
-              wait_seconds=18000
+            # GitHub job не держим всю ночь одним куском.
+            if (( wait_seconds > 14400 )); then
+              wait_seconds=14400
             fi
 
             if (( wait_seconds > 0 )); then
-              echo "MAX СПИТ. СЕКУНД ДО СЛЕДУЮЩЕГО ЦИКЛА: $wait_seconds"
+              echo "MAX СПИТ. ЖДЁМ $wait_seconds СЕКУНД."
               sleep "$wait_seconds"
             fi
 
           else
-            for i in $(seq 1 11); do
-              hour=$((10#$(get_hour)))
 
-              if (( hour >= 22 || hour < 6 )); then
-                echo "НАСТУПИЛ НОЧНОЙ РЕЖИМ. ПРОВЕРКИ MAX ОСТАНОВЛЕНЫ."
-                break
-              fi
+            lookback=40
 
-              lookback=40
+            # Утренняя проверка забирает сообщения за ночь.
+            if (( hour == 6 )); then
+              lookback=540
+              echo "УТРЕННИЙ ДОБОР НОЧНЫХ СООБЩЕНИЙ"
+            fi
 
-              # Первая утренняя проверка забирает ночной хвост.
-              if (( hour == 6 )); then
-                lookback=540
-              fi
+            echo "ГЛУБИНА ПРОВЕРКИ: $lookback МИНУТ"
 
-              echo "=========================================="
-              echo "MAX CHECK $i / 11"
-              echo "МОСКОВСКОЕ ВРЕМЯ: $(TZ=Europe/Moscow date)"
-              echo "ГЛУБИНА ПРОВЕРКИ: $lookback МИНУТ"
-              echo "=========================================="
+            LOOKBACK_MINUTES="$lookback" node observer.mjs
 
-              LOOKBACK_MINUTES="$lookback" node observer.mjs \
-                || echo "ОШИБКА MAX — СЛЕДУЮЩАЯ ПРОВЕРКА ПРОДОЛЖИТ ЦИКЛ"
+            echo "ПРОВЕРКА MAX ЗАВЕРШЕНА"
+            echo "СЛЕДУЮЩАЯ ПРОВЕРКА ЧЕРЕЗ 30 МИНУТ"
 
-              if [ "$i" -lt 11 ]; then
-                sleep 1800
-              fi
-            done
+            sleep 1800
           fi
 
-      - name: Start next observer cycle
+      - name: Start next MAX check
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
