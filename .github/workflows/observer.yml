@@ -31,24 +31,73 @@ jobs:
           MAX_SESSION: ${{ secrets.MAX_SESSION }}
         run: printf '%s' "$MAX_SESSION" > .max-session.json
 
-      - name: Check MAX every 30 minutes
+      - name: Run MAX observer cycle
+        shell: bash
         run: |
-          for i in $(seq 1 11); do
-            echo "=========================================="
-            echo "MAX CHECK $i / 11"
-            date -u
-            echo "=========================================="
+          set -u
 
-            node observer.mjs || echo "MAX CHECK ERROR — NEXT CHECK WILL CONTINUE"
+          get_hour() {
+            TZ=Europe/Moscow date +%H
+          }
 
-            if [ "$i" -lt 11 ]; then
-              sleep 1800
+          hour=$((10#$(get_hour)))
+
+          if (( hour >= 22 || hour < 6 )); then
+            echo "НОЧНОЙ РЕЖИМ MAX: 22:00–06:00"
+
+            now=$(TZ=Europe/Moscow date +%s)
+
+            if (( hour >= 22 )); then
+              target=$(TZ=Europe/Moscow date -d 'tomorrow 06:00:00' +%s)
+            else
+              target=$(TZ=Europe/Moscow date -d 'today 06:00:00' +%s)
             fi
-          done
+
+            wait_seconds=$((target - now))
+
+            # Один GitHub job не держим дольше 5 часов ожидания.
+            if (( wait_seconds > 18000 )); then
+              wait_seconds=18000
+            fi
+
+            if (( wait_seconds > 0 )); then
+              echo "MAX СПИТ. СЕКУНД ДО СЛЕДУЮЩЕГО ЦИКЛА: $wait_seconds"
+              sleep "$wait_seconds"
+            fi
+
+          else
+            for i in $(seq 1 11); do
+              hour=$((10#$(get_hour)))
+
+              if (( hour >= 22 || hour < 6 )); then
+                echo "НАСТУПИЛ НОЧНОЙ РЕЖИМ. ПРОВЕРКИ MAX ОСТАНОВЛЕНЫ."
+                break
+              fi
+
+              lookback=40
+
+              # Первая утренняя проверка забирает ночной хвост.
+              if (( hour == 6 )); then
+                lookback=540
+              fi
+
+              echo "=========================================="
+              echo "MAX CHECK $i / 11"
+              echo "МОСКОВСКОЕ ВРЕМЯ: $(TZ=Europe/Moscow date)"
+              echo "ГЛУБИНА ПРОВЕРКИ: $lookback МИНУТ"
+              echo "=========================================="
+
+              LOOKBACK_MINUTES="$lookback" node observer.mjs \
+                || echo "ОШИБКА MAX — СЛЕДУЮЩАЯ ПРОВЕРКА ПРОДОЛЖИТ ЦИКЛ"
+
+              if [ "$i" -lt 11 ]; then
+                sleep 1800
+              fi
+            done
+          fi
 
       - name: Start next observer cycle
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run observer.yml --ref main
-

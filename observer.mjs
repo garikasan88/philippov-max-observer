@@ -21,8 +21,14 @@ const chats = client.getChats().filter(
 
 console.log('МАКСИМ ГОТОВ. ЧАТОВ:', client.getChats().length);
 
+const rawLookback = Number(process.env.LOOKBACK_MINUTES ?? 40);
+const lookbackMinutes =
+  Number.isFinite(rawLookback) && rawLookback > 0
+    ? Math.floor(rawLookback)
+    : 40;
+
 const now = Date.now();
-const since = now - 40 * 60 * 1000;
+const since = now - lookbackMinutes * 60 * 1000;
 let found = 0;
 
 for (const chat of chats) {
@@ -54,5 +60,9 @@ for (const chat of chats) {
   }
 }
 
-console.log('ПРОВЕРКА ЗАВЕРШЕНА. СООБЩЕНИЙ ЗА 40 МИНУТ:', found);
+console.log(
+  `ПРОВЕРКА ЗАВЕРШЕНА. СООБЩЕНИЙ ЗА ${lookbackMinutes} МИНУТ:`,
+  found
+);
+
 process.exit(0);
