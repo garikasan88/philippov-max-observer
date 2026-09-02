@@ -1,22 +1,54 @@
-name: MAX Observer Test
+name: MAX Observer
+
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '17,47 * * * *'
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: max-observer-continuous
+  cancel-in-progress: false
+
 jobs:
   observer:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 350
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
           cache: 'npm'
+
       - run: npm ci
+
       - name: Restore MAX session
         env:
           MAX_SESSION: ${{ secrets.MAX_SESSION }}
         run: printf '%s' "$MAX_SESSION" > .max-session.json
-      - name: Run observer
-        run: node observer.mjs
+
+      - name: Check MAX every 30 minutes
+        run: |
+          for i in $(seq 1 11); do
+            echo "=========================================="
+            echo "MAX CHECK $i / 11"
+            date -u
+            echo "=========================================="
+
+            node observer.mjs || echo "MAX CHECK ERROR — NEXT CHECK WILL CONTINUE"
+
+            if [ "$i" -lt 11 ]; then
+              sleep 1800
+            fi
+          done
+
+      - name: Start next observer cycle
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run observer.yml --ref main
+
