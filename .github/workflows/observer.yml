@@ -1,0 +1,20 @@
+name: MAX Observer Test
+on:
+  workflow_dispatch:
+jobs:
+  observer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Restore MAX session
+        env:
+          MAX_SESSION: ${{ secrets.MAX_SESSION }}
+        run: printf '%s' "$MAX_SESSION" > .max-session.json
+      - name: Run observer
+        run: node observer.mjs
