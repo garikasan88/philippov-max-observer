@@ -2,7 +2,7 @@ name: MAX Observer Test
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '17,47 * * * *'
 jobs:
   observer:
     runs-on: ubuntu-latest
@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
       - run: npm ci
       - name: Restore MAX session
