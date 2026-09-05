@@ -50,7 +50,7 @@ jobs:
           const { WebMaxClient } = require('webmaxsocket');
 
           // ------------------------------------------------------------
-          // PHILIPPOV MAX OBSERVER V2 FINAL
+          // PHILIPPOV MAX OBSERVER V2 FINAL + REQUEST PARSER DRY v1.0
           // Read-only. No send/reply/edit/delete methods are called.
           // One target account + one confirmed test chat.
           // ------------------------------------------------------------
@@ -318,9 +318,511 @@ jobs:
             }
           }
 
+          // ============================================================
+          // REQUEST PARSER v1.0 — port of CLOSED 61-case REQUEST/MATCH ruleset
+          // DRY ONLY: parse/classify; does not send anything to MAX.
+          // ============================================================
+          // PHILIPPOV SCOUT REQUEST PARSER v1.0
+          // Ported without semantic redesign from CURRENT_REQUEST_MATCH_DRY_V06 (01.09.2026).
+          // Training basis: 61 manually reviewed REQUEST→MATCH cases. UNKNOWN stays UNKNOWN.
+          
+          function normalizeText(text) {
+            return String(text ?? "")
+              .toLowerCase()
+              .replaceAll("ё", "е")
+              .replaceAll("²", "2")
+              .replace(/[^0-9a-zа-я]+/giu, " ")
+              .replace(/\s+/g, " ")
+              .trim();
+          }
+          
+          function containsAny(norm, needles) {
+            return needles.some(x => norm.includes(normalizeText(x)));
+          }
+          
+          function firstNumber(s) {
+            const m = String(s ?? "").match(/\d+(?:[.,]\d+)?/u);
+            return m ? Number(m[0].replace(",", ".")) : null;
+          }
+          
+          function moneyTokenToRub(rawNum, rawUnit = "") {
+            const src = String(rawNum).trim();
+            const grouped = /^\d{1,3}(?:[ \u00A0\u202F]\d{3}){1,2}$/.test(src);
+            const compact = grouped ? src.replace(/[^\d]/g, "") : src.replace(",", ".");
+            const n = Number(compact);
+            if (!Number.isFinite(n) || n <= 0) return null;
+            const u = normalizeText(rawUnit);
+            if (/млн|милл|миллион/u.test(u)) return Math.round(n * 1_000_000);
+            if (/тыс|тр/u.test(u)) return Math.round(n * 1_000);
+            if (/руб/u.test(u)) return Math.round(n);
+            if (grouped && n >= 100000) return Math.round(n);
+            if (grouped && n >= 1000 && n < 100000) return Math.round(n * 1_000);
+            if (n >= 1000 && n <= 100000) return Math.round(n * 1_000);
+            if (n >= 1 && n < 100) return Math.round(n * 1_000_000);
+            if (n >= 100000 && n <= 100000000) return Math.round(n);
+            return null;
+          }
+          
+          function parseBudgetMax(text) {
+            const raw = String(text ?? "").replace(/(\d)\.(\d{3})(?!\d)/g, "$1 $2");
+            const candidates = [];
+            const add = (num, unit, why) => {
+              const v = moneyTokenToRub(num, unit);
+              if (v !== null && v >= 500_000 && v <= 100_000_000) candidates.push({value:v, why});
+            };
+            const N = "(\\d{1,3}(?:[ \\u00A0\\u202F]\\d{3}){1,2}|\\d+(?:[.,]\\d+)?)";
+            const U = "(млн|миллион(?:а|ов)?|тыс(?:яч)?|тр\\.?|т\\.?\\s*р\\.?|руб(?:лей|ля|\\.)?)?";
+          
+            // Explicit budget wording may legally carry a plain 4-digit "thousands" value.
+            for (const m of raw.matchAll(new RegExp(`бюджет(?:\\s*(?:до|макс(?:имум)?))?[^\\d\\n]{0,18}${N}\\s*${U}`, "giu"))) add(m[1], m[2] || "", "budget-explicit");
+            for (const m of raw.matchAll(new RegExp(`(?:до|макс(?:имум)?)[^\\d\\n]{0,8}${N}\\s*(млн|миллион(?:а|ов)?|тыс(?:яч)?|тр\\.?|т\\.?\\s*р\\.?|руб(?:лей|ля|\\.)?)`, "giu"))) add(m[1], m[2], "money-unit");
+            // "до 6500" / "до 5 700" without unit is common realtor shorthand; require thousands-like shape so "до 20 лет" is never money.
+            for (const m of raw.matchAll(/(?:до|макс(?:имум)?)[^\d\n]{0,8}(\d{4,5}|\d{1,2}[ \u00A0\u202F]\d{3})(?!\s*(?:лет|этаж|м2|м²|кв))/giu)) add(m[1], "", "shorthand-thousands");
+            for (const m of raw.matchAll(/(\d{3,5})\s*(?:тыс(?:яч)?|тр\.?)?\s*(?:нал|налич)/giu)) add(m[1], "тыс", "cash-adjacent");
+            for (const m of raw.matchAll(/(?:нал|налич(?:ка|ные|ными)?)[^\d\n]{0,8}(\d{3,5}|\d{1,2}[ \u00A0\u202F]\d{3})(?!\s*(?:лет|этаж|м2|м²|кв))/giu)) add(m[1], "", "cash-following");
+            for (const m of raw.matchAll(/(\d{3,5})\s*[-–—]\s*(\d{3,5})(?:\s*(?:тыс|тр))?/giu)) add(m[2], "тыс", "range-thousands");
+            for (const m of raw.matchAll(/(\d+(?:[.,]\d+)?)\s*[-–—]\s*(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?)/giu)) add(m[2], m[3], "range-millions");
+            // Common realtor shorthand without the word "budget": "6,2 млн" or object mention "за 3500".
+            for (const m of raw.matchAll(/(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?)/giu)) add(m[1], m[2], "generic-millions");
+            for (const m of raw.matchAll(/\bза\s+(\d{4,5})(?!\s*(?:лет|этаж|м2|м²|кв))/giu)) add(m[1], "", "price-after-za");
+          
+            if (!candidates.length) return null;
+            return candidates.sort((a,b) => b.value - a.value)[0].value;
+          }
+          
+          function parseConditionalFinanceBudgets(text) {
+            const raw = String(text ?? "").replace(/(\d)\.(\d{3})(?!\d)/g, "$1,$2");
+            const get = (re) => {
+              const m = raw.match(re);
+              return m ? moneyTokenToRub(m[1], m[2] || "") : null;
+            };
+            const familyMortgageMax = get(/если\s+семейн(?:ая|ой)?\s+ипотек[^\d\n]{0,25}(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)?/iu);
+            const cashMax = get(/если\s+налич(?:ные|ка|ными)?[^\d\n]{0,25}(?:до\s*)?(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)?/iu);
+            return {familyMortgageMax, cashMax};
+          }
+          
+          function parseTypeSpecificBudgets(text) {
+            const raw = String(text ?? "").replace(/(\d)\.(\d{3})(?!\d)/g, "$1,$2");
+            const out = {studio:null, "1k":null, euro2:null, "2k":null, "3k":null, house:null};
+            const take = (reRange, reOne, key) => {
+              const mr = raw.match(reRange);
+              if (mr) { out[key] = moneyTokenToRub(mr[2], mr[3] || ""); return; }
+              const mo = raw.match(reOne);
+              if (mo) out[key] = moneyTokenToRub(mo[1], mo[2] || "");
+            };
+            take(/(?:однушк[а-я]*|1\s*[- ]?(?:к|ком)[а-я]*)[^\n\d]{0,24}(\d+(?:[.,]\d+)?)\s*[-–—]\s*(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu,
+                 /(?:однушк[а-я]*|1\s*[- ]?(?:к|ком)[а-я]*)[^\n\d]{0,24}(?:до\s*)?(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu, "1k");
+            take(/(?:двушк[а-я]*|2\s*[- ]?(?:к|ком)[а-я]*)[^\n\d]{0,24}(\d+(?:[.,]\d+)?)\s*[-–—]\s*(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu,
+                 /(?:двушк[а-я]*|2\s*[- ]?(?:к|ком)[а-я]*)[^\n\d]{0,24}(?:до\s*)?(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu, "2k");
+            take(/(?:тр[её]шк[а-я]*|3\s*[- ]?(?:к|ком)[а-я]*)[^\n\d]{0,24}(\d+(?:[.,]\d+)?)\s*[-–—]\s*(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu,
+                 /(?:тр[её]шк[а-я]*|3\s*[- ]?(?:к|ком)[а-я]*)[^\n\d]{0,24}(?:до\s*)?(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu, "3k");
+            take(/студи[а-я]*[^\n\d]{0,24}(\d+(?:[.,]\d+)?)\s*[-–—]\s*(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu,
+                 /студи[а-я]*[^\n\d]{0,24}(?:до\s*)?(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu, "studio");
+            return out;
+          }
+          
+          function parseCommissionInside(text) {
+            const raw = String(text ?? "").replace(/(\d)\.(\d{3})(?!\d)/g, "$1 $2");
+            const norm = normalizeText(raw);
+            const inside = /(?:мои|моими|наши|нашими|комисс)[^\n]{0,30}(?:внутри|в цене)|(?:внутри)[^\n]{0,30}(?:мои|наши|комисс)/iu.test(raw) || /с\s+(?:моими|нашими)/iu.test(raw);
+            const above = /(?:мои|наши|комисс)[^\n]{0,30}(?:сверху)|(?:сверху)[^\n]{0,30}(?:мои|наши|комисс)/iu.test(raw);
+            const parseCommissionNum = (num, unit="") => {
+              let v = moneyTokenToRub(num, unit);
+              if (v === null) {
+                const n = Number(String(num).replace(/[^\d.,]/g, "").replace(",", "."));
+                if (Number.isFinite(n) && n >= 20 && n <= 999) v = Math.round(n * 1000);
+              }
+              return v;
+            };
+            let amount = null;
+            // For "150-200" reserve the upper end so the buyer budget is never overstated.
+            const range = raw.match(/(?:мои|моими|наши|нашими|комисс(?:ия|ии|ию)?)[^\d\n]{0,15}(\d{2,4})\s*[-–—]\s*(\d{2,4})/iu) || raw.match(/(\d{2,4})\s*[-–—]\s*(\d{2,4})[^\n]{0,15}(?:мои|наши|комисс)/iu);
+            if (range) amount = parseCommissionNum(range[2], "");
+            if (amount === null) {
+              for (const m of raw.matchAll(/(?:мои|моими|наши|нашими|комисс(?:ия|ии|ию)?)[^\d\n]{0,20}(\d{1,3}(?:[ \u00A0\u202F]\d{3})?|\d+(?:[.,]\d+)?)\s*(тыс|тр|млн)?/giu)) {
+                const v = parseCommissionNum(m[1], m[2] || "");
+                if (v !== null && v >= 20_000 && v <= 2_000_000) { amount = v; break; }
+              }
+            }
+            if (amount === null) {
+              for (const m of raw.matchAll(/(\d{1,3}(?:[ \u00A0\u202F]\d{3})?|\d+(?:[.,]\d+)?)\s*(тыс|тр)?[^\n]{0,12}(?:мои|наши|комисс)/giu)) {
+                const v = parseCommissionNum(m[1], m[2] || "");
+                if (v !== null && v >= 20_000 && v <= 2_000_000) { amount = v; break; }
+              }
+            }
+            const percent = (() => {
+              const m = raw.match(/(?:мои|моими|наши|нашими|комисс(?:ия|ии|ию)?)[^\d%\n]{0,15}(\d+(?:[.,]\d+)?)\s*%/iu) || raw.match(/(\d+(?:[.,]\d+)?)\s*%[^\n]{0,12}(?:мои|наши|комисс)/iu);
+              return m ? Number(m[1].replace(",", ".")) : null;
+            })();
+            const clientPays = /клиент\s+платит|покупатель\s+(?:сам\s+)?(?:платит|оплачивает)/iu.test(raw);
+            return {inside, above, amount, percent, clientPays, hidden: clientPays && amount === null && percent === null, rawHint: norm.includes("с нашими") || norm.includes("с моими")};
+          }
+          
+          
+          const REQUEST_JK_ALIASES = Object.freeze({
+            "смородина": ["смородина"],
+            "перспектива": ["перспектива"],
+            "альфа": ["альфа", "кино"],
+            "кино": ["альфа", "кино"],
+            "панорама": ["панорама"],
+            "дом у озера": ["дом у озера", "дом озера"],
+            "симфония": ["симфония"],
+            "адмирал": ["адмирал"],
+            "любимово": ["любимово"],
+            "образцово": ["образцово"],
+            "парусная регата": ["парусная регата"],
+            "премьера": ["премьера"],
+            "парк победы": ["парк победы"],
+            "мозаика": ["мозаика"],
+            "ракурс": ["ракурс"],
+            "югге": ["югге"],
+            "сегодня": ["жк сегодня"],
+            "новелла": ["новелла"],
+            "облака": ["облака"],
+            "сармат": ["сармат"],
+            "друзья": ["жк друзья", "друзья"],
+            "спорт вилладж": ["спорт вилладж", "sport village"],
+            "спортивная деревня": ["спортивная деревня"],
+            "южане": ["южане"],
+            "восточно-кругликовская-черкасская": ["восточно кругликовская черкасская", "таурус", "таурас"],
+          });
+          
+          function detectKnownJks(text) {
+            const norm = normalizeText(text);
+            const out = [];
+            for (const [canon, aliases] of Object.entries(REQUEST_JK_ALIASES)) {
+              if (aliases.some(a => norm.includes(normalizeText(a)))) out.push(canon);
+            }
+            return [...new Set(out)];
+          }
+          
+          const GEO_ALIASES = Object.freeze({
+            "весь краснодар": ["весь краснодар", "район не важен", "любой район", "смотрим все", "смотрим всё"],
+            "прикубанский": ["прикубан", "прикубанка"],
+            "карасунский": ["карасун", "карасунка"],
+            "фестивальный": ["фмр", "фестивальн"],
+            "черемушки": ["чмр", "черемуш", "черёмуш"],
+            "гидрострой": ["гмр", "гидростро"],
+            "комсомольский": ["кмр", "комсомольск"],
+            "кск": ["кск"],
+            "хбк": ["хбк"],
+            "пашковский": ["пмр", "пашковск"],
+            "юбилейный": ["юмр", "юбилей"],
+            "восточно-кругликовский": ["восточно кругликов", "восточка", "40 лет", "черкасск"],
+            "губернский": ["губернск"],
+            "западный обход": ["западн обход"],
+            "ближний западный обход": ["ближн западн обход"],
+            "энка": ["энка", "красная площадь"],
+            "музыкальный": ["музыкальн"],
+            "петра метальникова": ["метальников"],
+            "центр": ["цмр", "центр", "красная", "сенной", "вокзал краснодар 1"],
+            "дубинка": ["дубинк"],
+            "северный": ["северн"],
+            "южный": ["южный"],
+            "березовый": ["березов", "берёзов"],
+            "прогресс": ["прогресс"],
+            "витамин": ["витамин"],
+            "елизаветинская": ["елизавет", "елизаветка"],
+            "новая адыгея": ["новая адыгея", "адыгея"],
+            "динская": ["динск"],
+            "российский": ["российск"],
+            "краснодарский": ["краснодарский"],
+            "кирилла россинского": ["россинск"],
+            "знаменский": ["знаменск"],
+            "новознаменский": ["новознаменск"],
+            "ростовское шоссе": ["ростовск шоссе"],
+            "ейское шоссе": ["ейск шоссе"],
+            "парк галицкого": ["парк галицк"],
+          });
+          
+          function detectGeoTerms(text) {
+            const norm = normalizeText(text);
+            const out = [];
+            for (const [canon, aliases] of Object.entries(GEO_ALIASES)) {
+              if (aliases.some(a => norm.includes(normalizeText(a)))) out.push(canon);
+            }
+            // Explicit streets useful for exact/local matching.
+            const streetHints = [
+              "московская","зиповская","промышленная","фабричная","черкасская","красная","ставропольская","тургенева","гаражная","дальняя","гаврилова","дзержинского","морская","рашпилевская","жигуленко","парусная","автолюбителей","рахманинова","достоевского"
+            ];
+            for (const s of streetHints) if (norm.includes(normalizeText(s))) out.push(`улица:${s}`);
+            return [...new Set(out)];
+          }
+          
+          function parseRequestTypes(text) {
+            const raw = String(text ?? "");
+            const norm = normalizeText(raw);
+            const types = new Set();
+            if (/студ/iu.test(norm)) types.add("studio");
+            if (/(?:1\s*(?:к|ком)|одноком|однуш)/iu.test(norm)) types.add("1k");
+            if (/евро\s*[- ]?2|евро2/iu.test(norm)) types.add("euro2");
+            if (/(?:2\s*(?:к|ком)|двуш)/iu.test(norm)) types.add("2k");
+            if (/(?:3\s*(?:к|ком)|тр[её]ш)/iu.test(norm)) types.add("3k");
+            // Realtor shorthand: "1-2к" or "1,2 к" means both one- and two-room options.
+            if (/1\s*[-–—,/]\s*2\s*(?:к|ком)/iu.test(raw)) { types.add("1k"); types.add("2k"); }
+            if (/коммерц|общепит|нежил/iu.test(norm)) types.add("commercial");
+            const apartmentMention = [...types].some(t => ["studio","1k","euro2","2k","3k"].includes(t));
+            if (!apartmentMention && /(?:^|\s)(?:дом|дача|коттедж)(?:\s|$)|таунхаус|дуплекс|часть\s+дома/iu.test(norm)) types.add("house");
+            if (/часть\s+дома|таунхаус|дуплекс|квартира\s+на\s+земле/iu.test(norm)) types.add("ground-format");
+            return [...types];
+          }
+          
+          function parseAreaConstraint(text) {
+            const raw = String(text ?? "");
+            let min = null, max = null, preferred = null;
+            const range = raw.match(/(?:площад(?:ь|и)?\s*)?(\d+(?:[.,]\d+)?)\s*(?:[-–—]|до)\s*(\d+(?:[.,]\d+)?)\s*(?:м2|м²|кв)/iu);
+            if (range) {
+              min = Number(range[1].replace(",", ".")); max = Number(range[2].replace(",", "."));
+            }
+            for (const m of raw.matchAll(/(?:от|минимум)\s*(\d+(?:[.,]\d+)?)\s*(?:м2|м²|кв)/giu)) {
+              const v = Number(m[1].replace(",", ".")); min = min === null ? v : Math.max(min, v);
+            }
+            if (min === null && max === null) {
+              const m = raw.match(/(?:площад(?:ь|и)?\s*[:\-]?\s*|\b)(\d+(?:[.,]\d+)?)\s*(?:м2|м²|кв\.?\s*м|кв\.(?!\s*[а-я]))/iu);
+              if (m) {
+                const v = Number(m[1].replace(",", "."));
+                // Training rule: bare requested area is normally a floor, not an exact equality.
+                if (v >= 18 && v <= 300) min = v;
+              }
+            }
+            const ideal = raw.match(/(?:в идеале|идеально)[^\d]{0,10}(\d+(?:[.,]\d+)?)/iu);
+            if (ideal) {
+              preferred = Number(ideal[1].replace(",", "."));
+              // Training case 58: "100-130, в идеале 130" means 100 is minimum, 130 is ideal, not a ceiling.
+              if (max !== null && Math.abs(max - preferred) < 0.001) max = null;
+            }
+            return {min, max, preferred};
+          }
+          
+          function parseLandConstraint(text) {
+            const raw = String(text ?? "");
+            let min = null;
+            let m = raw.match(/(?:участок|земл(?:я|и))[^\d\n]{0,20}(?:от\s*)?(\d+(?:[.,]\d+)?)\s*сот/iu);
+            if (!m) m = raw.match(/(?:от\s*)?(\d+(?:[.,]\d+)?)\s*(?:сот(?:ок|ки)?\s+)?земл(?:и|я)/iu);
+            if (m) min = Number(m[1].replace(",", "."));
+            return {min};
+          }
+          
+          function parseFloorConstraint(text) {
+            const raw = String(text ?? "");
+            const norm = normalizeText(raw);
+            let min = null, max = null;
+            let m = raw.match(/этаж(?:и|ей)?\s*[:\-]?\s*(\d{1,2})\s*[-–—]\s*(\d{1,2})/iu) || raw.match(/(\d{1,2})\s*[-–—]\s*(\d{1,2})\s*этаж/iu);
+            if (m) { min = Number(m[1]); max = Number(m[2]); }
+            m = raw.match(/до\s*(\d{1,2})\s*(?:этажа|этаж|эт\.?)/iu) || raw.match(/этаж[^.\n;]{0,20}\bдо\s*(\d{1,2})/iu);
+            if (m) max = Number(m[1]);
+            m = raw.match(/(?:этаж[^.\n;]{0,20})?\bот\s*(\d{1,2})\s*(?:этажа|этаж|эт\.?)/iu);
+            if (m) min = Number(m[1]);
+            if (/первые\s+этажи\s+до\s+3|с\s+1\s+по\s+3/iu.test(raw)) { min = 1; max = 3; }
+            return {
+              min, max,
+              excludeFirst: /не\s*(?:1|перв)[^.\n;]{0,20}этаж|этаж[^.\n;]{0,12}не\s*1/iu.test(raw),
+              excludeLast: /не\s*последн[^.\n;]{0,20}этаж|этаж[^.\n;]{0,12}не\s*последн/iu.test(raw),
+              lowerFloors: /нижн(?:ие|их)\s+этаж/iu.test(raw),
+              middleFloors: /средн(?:ий|ие|их|ем)\s+этаж/iu.test(raw),
+            };
+          }
+          
+          function streetStem(value) {
+            let n = normalizeText(value);
+            if (!n) return null;
+            n = n.replace(/(?:ской|ская|скую|ском|ский|ой|ая|ую|ый|ий)$/u, "");
+            return n.length >= 4 ? n : normalizeText(value);
+          }
+          
+          function parseRequest(text) {
+            const raw = String(text ?? "").trim();
+            const norm = normalizeText(raw);
+            if (!raw) return {kind:"IGNORE", reason:"EMPTY"};
+          
+            if (/выкуп\s+недвижим|срочн(?:ый|ая)?\s+выкуп|скупаем\s+квартир/iu.test(raw)) {
+              return {kind:"IGNORE", reason:"BUYOUT_MESSAGE"};
+            }
+          
+            const ourObjectMention = /(?:чей\s+объект|отзовитесь[^\n]{0,30}объект|кто\s+(?:отправлял|скидывал|давал)[^\n]{0,30}объект|отзовитесь\s+чей)/iu.test(raw);
+            if (ourObjectMention) return {kind:"OUR_OBJECT_MENTION", raw, norm};
+          
+            const explicitRequestLike = /(?:запрос|нужн[аоы]?|ищу|клиент[^\n]{0,20}(?:ищет|нужн)|кто\s+занимается\s+коммерц|смотрим\s+завтра|готовы\s+на\s+задаток)/iu.test(raw);
+            const propertyShapeLike = /(?:студ|одноком|двуш|тр[её]ш|евро\s*[- ]?2|\d\s*[- ]?(?:к|ком)|дом|дач|коммерц)/iu.test(raw) && /(?:до\s*\d|бюджет|налич|ипотек|жк|район|этаж|ремонт|пчо)/iu.test(raw);
+            const requestLike = explicitRequestLike || propertyShapeLike;
+            if (!requestLike) return {kind:"IGNORE", reason:"NOT_REQUEST"};
+          
+            const types = parseRequestTypes(raw);
+            const budgetMax = parseBudgetMax(raw);
+            const commission = parseCommissionInside(raw);
+            const area = parseAreaConstraint(raw);
+            // Training case 18: "просторная 1к" without a number starts at 45 m².
+            if (area.min === null && /просторн\w*[^\n]{0,20}(?:1\s*(?:к|ком)|одноком|однуш)/iu.test(raw)) area.min = 45;
+            const land = parseLandConstraint(raw);
+            const floor = parseFloorConstraint(raw);
+            const knownJks = detectKnownJks(raw);
+            const geo = detectGeoTerms(raw);
+          
+            const softJkPreference = /(?:желательно|предпочтительно|в приоритете|приоритет)[^\n]{0,80}(?:жк|панорам|премьер|регат|парк|комплекс)/iu.test(raw);
+            const exactOnly = !softJkPreference && (/(?:только|другое\s+не\s+предлагать|именно)[^\n]{0,70}(?:жк|комплекс)|(?:жк[^\n]{0,80})(?:другое\s+не\s+предлагать)/iu.test(raw) || (knownJks.length > 0 && !/(?:и\s+рядом|ближайш|и\s+др\.?|и\s+друг)/iu.test(raw)));
+          
+            const conditions = {
+              repairRequired: /ремонт/iu.test(raw) && !/(?:ремонт\s+не\s+важен|с\s+ремонтом\s+и\s+без|любой\s+ремонт|можно\s+без\s+ремонт)/iu.test(raw),
+              goodRepair: /(?:хорош|приличн|красив)[^\n]{0,35}ремонт|ремонт[^\n]{0,35}(?:хорош|приличн|красив)/iu.test(raw),
+              freshRepair: /(?:свеж|нов(?:ый|ым)|евро)[^\n]{0,18}ремонт|ремонт[^\n]{0,18}(?:свеж|новый)/iu.test(raw) && !/желательно[^\n]{0,25}(?:нов(?:ый|ее)|свеж)|ремонт[^\n]{0,25}желательно[^\n]{0,15}(?:нов(?:ый|ее)|свеж)/iu.test(raw),
+              freshRepairPreferred: /желательно[^\n]{0,30}(?:нов(?:ый|ее)|свеж)|ремонт[^\n]{0,30}желательно[^\n]{0,20}(?:нов(?:ый|ее)|свеж)/iu.test(raw),
+              pchoRequired: /(?:пчо|предчист)/iu.test(raw) && !/(?:не\s+в\s*пчо|пчо\s+не\s+предлаг|можно\s+без\s*пчо)/iu.test(raw),
+              pchoExcluded: /(?:не\s+в\s*пчо|пчо\s+не\s+предлаг|без\s+пчо)/iu.test(raw),
+              furnitureRequired: /мебел[ьюи]/iu.test(raw) && !/(?:мебель\s+не\s+важ|можно\s+без[^\n]{0,15}мебел|мебель[^\n]{0,35}(?:не\s+важ|можно|желательно)|желательно[^\n]{0,35}мебел)/iu.test(raw),
+              appliancesRequired: /техник(?:а|ой|у)/iu.test(raw) && !/(?:техника\s+не\s+важ|можно\s+без[^\n]{0,15}техник|техник[^\n]{0,20}желательно|желательно[^\n]{0,35}техник)/iu.test(raw),
+              anyCondition: /(?:ремонт\s+не\s+важен|с\s+ремонтом\s+и\s+без|любой\s+ремонт|любое\s+состояние)/iu.test(raw),
+              noOldFund: /(?:старый\s+фонд\s*[-—]?\s*нет|старые\s+не\s+предлаг|не\s+старые\s+дома|современные\s+дома)/iu.test(raw),
+              gasRequired: /(?:\bгаз\b|газ\s+по\s+меже|дом\s+с\s+газом)/iu.test(raw),
+              courtyardWindows: /окн(?:а|ами)\s+во\s+двор/iu.test(raw),
+              quietRequired: /тихое\s+место[^\n]{0,20}(?:ключ|важ)|ключев[^\n]{0,20}тих/iu.test(raw),
+              centralHeating: /центральн(?:ое|ым)\s+отоплен/iu.test(raw),
+              livableRequired: /жилое\s+состояние|хорош(?:ее|ем)\s+состояние|ремонт\s+не\s+убит|не\s+убит(?:ый|ом)\s+ремонт/iu.test(raw),
+              secondaryRequired: /вторичк/iu.test(raw),
+              foodServiceRequired: /под\s+общепит|общепит/iu.test(raw),
+              directRiverRequired: /(?:обязательн[^\n]{0,25})?прям(?:ой|ым)?\s+выход[^\n]{0,20}(?:к|на)\s+рек|выход\s+к\s+рек/iu.test(raw),
+              apartmentLegalStatusRequired: /часть\s+дома[^\n]{0,45}(?:в\s+статусе\s+квартир|статус\s+квартир)/iu.test(raw),
+              houseRiskCheckRequired: /благополучн(?:ые|ый|ом)\s+дом/iu.test(raw),
+              firstLineStreet: (() => { const m=raw.match(/первая\s+линия(?:\s+(?:ул\.?|улиц[аы]))?\s+([А-ЯЁA-Z][А-Яа-яЁёA-Za-z-]+)/iu); return m ? streetStem(m[1]) : null; })(),
+              conditionalLiftFloor: /2\s*[-–—]\s*7[^\n]{0,25}с\s+лифт[а-я]*[^\n]{0,35}2\s*[-–—]\s*3[^\n]{0,25}без\s+лифт/iu.test(raw) ? {min:2,maxWithLift:7,maxWithoutLift:3} : null,
+              modernOnly1k: /1\s*[- ]?(?:к|ком)[^\n]{0,40}современн[^\n]{0,50}(?:или|\/)\s*2\s*[- ]?(?:к|ком)[^\n]{0,40}стар(?:ый|ого)\s+фонд/iu.test(raw) || /1-комнатн[^\n]{0,40}современн[^\n]{0,50}2-комнатн[^\n]{0,40}стар(?:ый|ого)\s+фонд/iu.test(raw),
+              symphonyInnerCluster: knownJks.includes("симфония") && /не\s+перв[а-я]*\s+дом[а-я]*\s+у\s+дорог/iu.test(raw) && /трамва/iu.test(raw),
+              tramNearMoskovskaya: /московск[^\n]{0,35}(?:ближе|недалеко|не\s+далеко)[^\n]{0,25}трамва/iu.test(raw),
+              stationKrasnodar1Walking: /район[^\n]{0,15}вокзал[а]?\s+краснодар\s*[-–—]?\s*1/iu.test(raw),
+              tabrisSideRequired: /жигуленко[^\n]{0,80}сторон[аеы][^\n]{0,15}табрис|сторон[аеы][^\n]{0,15}табрис[^\n]{0,80}жигуленко/iu.test(raw),
+              // Case 19 correction: realtor clarified that "дома от 3 этажей" means normal multi-apartment stock, minimum 4-storey building.
+              buildingMinFloors: /дом(?:а|е)?[^\n]{0,20}от\s*3\s*этаж/iu.test(raw) ? 4 : null,
+              wholeContractAmount: /(?:вся|полная)\s+сумма\s+(?:в|по)\s+(?:дкп|договор)/iu.test(raw) && !/минимальн[а-я]*\s+разбивк[^\n]{0,30}(?:или|либо)[^\n]{0,30}(?:вся|полная)\s+сумма/iu.test(raw),
+              contractFullOrMinimalSplit: /минимальн[а-я]*\s+разбивк[^\n]{0,30}(?:или|либо)[^\n]{0,30}(?:вся|полная)\s+сумма|(?:вся|полная)\s+сумма[^\n]{0,30}(?:или|либо)[^\n]{0,30}минимальн[а-я]*\s+разбивк/iu.test(raw),
+              maxHouseAgeYears: (() => {
+                const m = raw.match(/дом[^.\n;]{0,20}не\s+старше\s+(\d{1,2})\s+лет/iu);
+                if (m) return Number(m[1]);
+                if (/современные\s+дома|не\s+старые\s+дома/iu.test(raw)) return 12;
+                return null;
+              })(),
+            };
+          
+            // If PCHO is merely one alternative alongside repair/no repair, it is allowed but not required (case 61).
+            if (/(?:с\s+ремонтом\s+и\s+без)[^\n]{0,50}(?:или\s+)?пчо|(?:или\s+пчо)/iu.test(raw)) conditions.pchoRequired = false;
+          
+            // Training correction: "ремонт, мебель и техника (можно)" means all three may be absent.
+            if (/(?:ремонт[^\n]{0,30}мебел[^\n]{0,30}техник)[^\n]{0,20}(?:можно|возможно)/iu.test(raw)) {
+              conditions.repairRequired = false; conditions.furnitureRequired = false; conditions.appliancesRequired = false;
+            }
+          
+            const exclusiveOnly = /только\s+(?:свои\s+)?экс|только\s+эксклюзив|свои\s+эксы/iu.test(raw);
+            const noAdvertisingMention = /без\s+авито|без\s+реклам|не\s+в\s+реклам|внешн(?:их|ие)\s+(?:источник|площадк)/iu.test(raw);
+            const preferNoAdvertising = noAdvertisingMention && /желательно[^\n]{0,30}без\s+авито|предпочтительно[^\n]{0,30}без\s+авито/iu.test(raw);
+            const noAdvertising = noAdvertisingMention && !preferNoAdvertising;
+            const noTrain = /без\s+паровоз/iu.test(raw);
+            const investorExcluded = /инвесторск[^\n]{0,20}не\s+предлаг|не\s+предлаг[^\n]{0,20}инвестор/iu.test(raw);
+            const urgent = /срочн|сегодня\s+(?:задаток|смотрим|показ)|больше\s+времени\s+нет/iu.test(raw);
+            const familyMortgage = /семейн(?:ая|ой)\s+ипотек/iu.test(raw);
+            const mortgage = familyMortgage || /ипотек/iu.test(raw);
+            const cash = /налич/iu.test(raw);
+            const financeBudgets = parseConditionalFinanceBudgets(raw);
+            const typeBudgets = parseTypeSpecificBudgets(raw);
+            const bankSber = /сбер/iu.test(raw);
+            const bigKitchen = /больш(?:ая|ой)\s+кухн/iu.test(raw);
+            const minBedrooms = (() => { const m = raw.match(/(?:от|минимум)\s*(\d+)\s+(?:спален|спальн)|(?:дом[^\n]{0,20})?(\d+)\s+(?:спален|спальн)/iu); return m ? Number(m[1] || m[2]) : null; })();
+            const firstPrice = /перв(?:ая|ым|ые|ых)\s+цен/iu.test(raw);
+            const preferences = {
+              brick:/в\s+приоритете[^\n]{0,30}кирпич|приоритет[^\n]{0,30}кирпич/iu.test(raw),
+              freshRepair:conditions.freshRepairPreferred,
+              noAdvertising:preferNoAdvertising,
+              lowerFloors:floor.lowerFloors,
+            };
+          
+            return {
+              kind:"REQUEST", raw, norm, urgent, types, budgetMax, commission, area, land, floor,
+              knownJks, exactJkOnly:exactOnly, geo, conditions, exclusiveOnly, noAdvertising, preferNoAdvertising, noTrain, investorExcluded,
+              finance:{mortgage, familyMortgage, cash, bankSber}, financeBudgets, typeBudgets, bigKitchen, minBedrooms, firstPrice, preferences,
+            };
+          }
+          
+          
+          function parserSelfTest() {
+            const fail = (name, detail='') => { throw new Error(`REQUEST PARSER SELFTEST ${name}${detail ? ': '+detail : ''}`); };
+          
+            let x;
+            x = parseRequest("Срочный запрос! ЖК Альфа (Кино). 2-к до 5 этажа, окна во двор. 6500 нал.");
+            if (x.kind !== 'REQUEST' || !x.urgent || !x.conditions.courtyardWindows || x.floor.max !== 5 || x.budgetMax !== 6500000 || !x.exactJkOnly) fail('case27');
+          
+            x = parseRequest("Трёшка до 8 млн наличка. Первые этажи до 3. ЖК Смородина.");
+            if (!x.types.includes('3k') || x.floor.min !== 1 || x.floor.max !== 3 || !x.knownJks.includes('смородина')) fail('case25');
+          
+            x = parseRequest("Запрос. Выкуп недвижимости. Студии 1к 2к. Главный критерий ниже рынка.");
+            if (x.kind !== 'IGNORE' || x.reason !== 'BUYOUT_MESSAGE') fail('case35');
+          
+            x = parseRequest("Коллеги, отправляли дом в СНТ Мечта за 3500. Отзовитесь, чей объект?");
+            if (x.kind !== 'OUR_OBJECT_MENTION') fail('case34');
+          
+            x = parseRequest("Студия. До 4 млн с нашими 200. ДРУГОЕ НЕ ПРЕДЛАГАТЬ. ЖК Облака, Сармат, Южане. Ремонт, мебель, техника (можно).");
+            if (x.budgetMax !== 4000000 || x.commission.amount !== 200000 || !x.commission.inside || x.conditions.repairRequired || !x.exactJkOnly) fail('case45');
+          
+            x = parseRequest("Запрос. 1-ком ЖК Симфония и рядом, не первые дома у дороги, но и не далеко от трамвая. До 6 этажа.");
+            if (!x.conditions.symphonyInnerCluster || x.floor.max !== 6) fail('case30');
+          
+            x = parseRequest("ЮМР 1-комн 40 м². Дом с газом. Не первый и не последний этаж. До 6 млн. С ремонтом и без, или ПЧО.");
+            if (x.area.min !== 40 || !x.conditions.gasRequired || !x.floor.excludeFirst || !x.floor.excludeLast || x.conditions.pchoRequired || x.budgetMax !== 6000000) fail('case61');
+          
+            x = parseRequest("Запрос. Однушка и двушка. Любимово или Образцово. Двушка — 9–9,5 млн. Однушка — 5–5,5 млн");
+            if (x.typeBudgets['1k'] !== 5500000 || x.typeBudgets['2k'] !== 9500000) fail('case52', JSON.stringify(x.typeBudgets));
+          
+            x = parseRequest("Запрос! ЧМР, Центр. Студия. Дома от 3 этажей с центральным отоплением. До 4000, наличные.");
+            if (x.conditions.buildingMinFloors !== 4 || !x.conditions.centralHeating || x.budgetMax !== 4000000) fail('case19');
+          
+            x = parseRequest("ФМР. 1к с евроремонтом! Именно с евро, новые. 10-летней давности не подходят. С минимальной разбивкой или полная сумма в договоре — это важно. Без Авито. Бюджет 9–9,5 млн.");
+            if (!x.conditions.contractFullOrMinimalSplit || x.conditions.wholeContractAmount || !x.noAdvertising || x.budgetMax !== 9500000) fail('case60');
+          
+            x = parseRequest("Запрос. Просторная 1к Центр. Желательно без Авито.");
+            if (x.area.min !== 45 || x.noAdvertising || !x.preferNoAdvertising) fail('case18');
+          
+            x = parseRequest("Запрос. Дом 60 кв., 7 земли, ремонт, мебель, до 5.700 (мои 200), ипотека 50/50 ПВ. Ростовское / Ейское шоссе.");
+            if (x.budgetMax !== 5700000 || x.area.min !== 60 || x.land.min !== 7 || x.commission.amount !== 200000) fail('case46');
+          
+            x = parseRequest("Студия или однокомнатная. Наличка 3500. Район ГМР. Желательно Парусная Регата, Премьера. Старые не предлагать.");
+            if (x.budgetMax !== 3500000 || !x.geo.includes('гидрострой') || !x.conditions.noOldFund) fail('case47');
+          
+            x = parseRequest("Запрос! ЧМР, ХБК. Часть дома в статусе квартиры или отдельный дом. 3 изолированные комнаты, жилое состояние, до 6500.");
+            if (!x.geo.includes('хбк') || !x.conditions.apartmentLegalStatusRequired || !x.conditions.livableRequired) fail('case53');
+          
+            x = parseRequest("Нужен дом. Обязательно прямой выход к реке. До 7 млн.");
+            if (!x.conditions.directRiverRequired || x.budgetMax !== 7000000) fail('case28');
+          
+            x = parseRequest("Студия. Первая линия ул. Московской. До 2,8 млн.");
+            if (x.conditions.firstLineStreet !== 'москов' || x.budgetMax !== 2800000) fail('case37', String(x.conditions.firstLineStreet));
+          
+            x = parseRequest("ЦМР в шаговой до Красной. ФМР. 1-комнатная от 40 м², современный фонд или 2-комнатная, старый фонд. Хороший ремонт, желательно новый. Этаж 2–7 с лифтом; 2–3 без лифта. До 7 млн.");
+            if (!x.conditions.goodRepair || x.conditions.freshRepair || !x.preferences.freshRepair || !x.conditions.modernOnly1k || !x.conditions.conditionalLiftFloor) fail('case29');
+          
+            x = parseRequest("Запрос. Жигуленко и ближайшие по стороне Табриса. 2к. До 6,2 млн.");
+            if (!x.conditions.tabrisSideRequired || x.budgetMax !== 6200000) fail('case51');
+          
+            x = parseRequest("Срочно‼️ По первым ценам район Петра Метальникова, Жигуленко. ПЧО. 1,2 к кв. Предложите свои варианты.");
+            if (!x.urgent || !x.firstPrice || !x.conditions.pchoRequired || x.budgetMax !== null) fail('case55');
+          
+            x = parseRequest("Запрос: дом, 4 спальни. Карасунский округ. Семейная ипотека. Бюджет 9 500.");
+            if (!x.types.includes('house') || x.minBedrooms !== 4 || !x.finance.familyMortgage || x.budgetMax !== 9500000) fail('case56');
+          
+            x = parseRequest("Запрос. 1–2к кв, до 6 этажа, улицы: Зиповская, Московская (ближе к трамваю), Промышленная, Фабричная. Квартира с ремонтом, мебелью, техникой (желательно), с большой кухней. Бюджет до 7,5 млн (с нашими 200, наличные). Смотрим завтра с 12:00.");
+            if (!x.bigKitchen || x.floor.max !== 6 || x.budgetMax !== 7500000 || x.commission.amount !== 200000 || !x.commission.inside || !x.conditions.tramNearMoskovskaya) fail('case57');
+          
+            x = parseRequest("Дом от 100–130 квадратов (в идеале 130). Участок от 4 соток. От 3 спален. Желаемый район Северный, Южный, на крайний случай Берёзовый. Рассмотрим с ремонтом и без. Если семейная ипотека — 13 млн, если наличные — до 10 млн. С нашими внутри 200 000. Смотрим завтра.");
+            if (x.area.min !== 100 || x.land.min !== 4 || x.minBedrooms !== 3 || x.financeBudgets.familyMortgageMax !== 13000000 || x.financeBudgets.cashMax !== 10000000 || x.commission.amount !== 200000) fail('case58');
+          
+            x = parseRequest("Кто занимается коммерцией? Нужна улица Красная, или Сенной рынок, или Ставропольская возле вузов!!! Под общепит. Напишите мне, кто занимается коммерцией именно там! Завтра смотрим с клиентом.");
+            if (!x.types.includes('commercial') || !x.conditions.foodServiceRequired || x.budgetMax !== null) fail('case59');
+          
+            return '61_CASE_RULESET_CORE_PASS / PORT_PASS';
+          }
+          
+
           async function main() {
             let client = null;
             try {
+              const parserStatus = parserSelfTest();
+              console.log(`REQUEST PARSER SELFTEST: ${parserStatus}`);
+
               // GitHub preflight BEFORE MAX login, so a rotated token is never lost
               // because of a missing GitHub permission.
               let stateIssue = await findIssueByTitle(STATE_TITLE);
@@ -478,6 +980,7 @@ jobs:
                   messageId: id,
                   time: iso(t),
                   raw: messageText(m),
+                  parsed: parseRequest(messageText(m)),
                 });
               }
 
@@ -496,6 +999,13 @@ jobs:
               await saveState(stateIssue.number, cursor, persistentSession);
 
               if (rows.length) {
+                const parserCounts = rows.reduce((acc, row) => {
+                  const k = row?.parsed?.kind || 'UNKNOWN';
+                  acc[k] = (acc[k] || 0) + 1;
+                  return acc;
+                }, {});
+                console.log(`REQUEST PARSER BATCH: ${JSON.stringify(parserCounts)}`);
+
                 // Repository is public: never publish RAW MAX text in plaintext.
                 // Persist the whole batch encrypted with the MAX_SESSION-derived AES-256-GCM key.
                 const encryptedFeed = encryptSession(rows, BOOTSTRAP_RAW);
