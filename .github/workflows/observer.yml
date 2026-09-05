@@ -50,7 +50,7 @@ jobs:
           const { WebMaxClient } = require('webmaxsocket');
 
           // ------------------------------------------------------------
-          // PHILIPPOV MAX OBSERVER V2 FINAL + REQUEST PARSER DRY v1.1 — BOUNDARY SAFE
+          // PHILIPPOV MAX OBSERVER V2 FINAL + REQUEST PARSER DRY v1.2 — MVP TRAINING
           // Read-only. No send/reply/edit/delete methods are called.
           // One target account + one confirmed test chat.
           // ------------------------------------------------------------
@@ -638,6 +638,17 @@ jobs:
             if (/выкуп\s+недвижим|срочн(?:ый|ая)?\s+выкуп|скупаем\s+квартир/iu.test(raw)) {
               return {kind:"IGNORE", reason:"BUYOUT_MESSAGE"};
             }
+
+
+            // MVP rule 05.09.2026:
+            // Explicit HOUSE-from-developer requests are not useful for our MATCH.
+            // "Дом" by itself is NOT an ignore signal; ready/resale houses remain REQUEST.
+            const developerHouseRequest =
+              /(?:дом|коттедж|таунхаус)[^\n]{0,50}(?:от\s+застройщик|у\s+застройщик|застройщик)/iu.test(raw) ||
+              /(?:от\s+застройщик|у\s+застройщик|застройщик)[^\n]{0,50}(?:дом|коттедж|таунхаус)/iu.test(raw);
+            if (developerHouseRequest) {
+              return {kind:"IGNORE", reason:"DEVELOPER_HOUSE_REQUEST"};
+            }
           
             const ourObjectMention = /(?:чей\s+объект|отзовитесь[^\n]{0,30}объект|кто\s+(?:отправлял|скидывал|давал)[^\n]{0,30}объект|отзовитесь\s+чей)/iu.test(raw);
             if (ourObjectMention) return {kind:"OUR_OBJECT_MENTION", raw, norm};
@@ -752,6 +763,13 @@ jobs:
           
             x = parseRequest("Запрос. Выкуп недвижимости. Студии 1к 2к. Главный критерий ниже рынка.");
             if (x.kind !== 'IGNORE' || x.reason !== 'BUYOUT_MESSAGE') fail('case35');
+
+
+            x = parseRequest("Нужен дом от застройщика. Карасунский округ. Семейная ипотека.");
+            if (x.kind !== 'IGNORE' || x.reason !== 'DEVELOPER_HOUSE_REQUEST') fail('developer-house-ignore');
+
+            x = parseRequest("Нужен готовый дом. Карасунский округ. До 9 млн. Семейная ипотека.");
+            if (x.kind !== 'REQUEST' || !x.types.includes('house')) fail('ready-house-kept');
           
             x = parseRequest("Коллеги, отправляли дом в СНТ Мечта за 3500. Отзовитесь, чей объект?");
             if (x.kind !== 'OUR_OBJECT_MENTION') fail('case34');
@@ -1009,6 +1027,15 @@ jobs:
                   return acc;
                 }, {});
                 console.log(`REQUEST PARSER BATCH: ${JSON.stringify(parserCounts)}`);
+
+
+              // Safe learning telemetry: only kind/reason counters, never RAW MAX text.
+              const reasonCounts = rows.reduce((acc, row) => {
+                const key = `${row?.parsed?.kind || 'UNKNOWN'}:${row?.parsed?.reason || 'NO_REASON'}`;
+                acc[key] = (acc[key] || 0) + 1;
+                return acc;
+              }, {});
+              console.log(`REQUEST PARSER REASONS: ${JSON.stringify(reasonCounts)}`);
 
                 // Repository is public: never publish RAW MAX text in plaintext.
                 // Persist the whole batch encrypted with the MAX_SESSION-derived AES-256-GCM key.
