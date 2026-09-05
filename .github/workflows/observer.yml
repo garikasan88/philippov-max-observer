@@ -50,7 +50,7 @@ jobs:
           const { WebMaxClient } = require('webmaxsocket');
 
           // ------------------------------------------------------------
-          // PHILIPPOV MAX OBSERVER V2 FINAL + REQUEST PARSER DRY v1.0
+          // PHILIPPOV MAX OBSERVER V2 FINAL + REQUEST PARSER DRY v1.1 — BOUNDARY SAFE
           // Read-only. No send/reply/edit/delete methods are called.
           // One target account + one confirmed test chat.
           // ------------------------------------------------------------
@@ -967,8 +967,12 @@ jobs:
 
                 maxTime = Math.max(maxTime, t);
                 if (seen.has(id)) continue;
-                if (t && t < lastTime) continue;
 
+                // BOUNDARY SAFE v1.1:
+                // seenIds is the authoritative deduplication mechanism.
+                // Never drop an unseen message only because MAX returned a timestamp
+                // older than the previous cursor. This closes the exact-run-boundary
+                // race where a message appears while the scheduled check is running.
                 nextSeen.push(id);
                 if (senderId(m) === EXPECTED_USER_ID) continue;
 
