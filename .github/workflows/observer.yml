@@ -1326,6 +1326,82 @@ jobs:
               const objectCid = String(objectChat.id);
               const objectHistory = await client.getHistory(Number(objectCid), Date.now(), HISTORY_BACKWARD, 0);
               if (!Array.isArray(objectHistory)) throw new Error('OBJECT_HISTORY_NOT_ARRAY');
+
+              // SAFE OBJECT SOURCE DIAGNOSTIC v1.4.2
+              // No RAW object text, sender names/IDs, message IDs, or exact prices are logged.
+              // Purpose: explain why visible object messages fail parseObjectMessage:
+              // EMPTY_TEXT -> NO_TYPE / NO_PRICE -> ACCEPT.
+              const objectDiagNowMs = Date.now();
+              const objectDiagRows = objectHistory.map((m, index) => {
+                const rawTime = messageTime(m);
+                const t = toMsTimestamp(rawTime);
+                const text = messageText(m).trim();
+                const types = text ? parseRequestTypes(text) : [];
+                const price = text ? parseObjectPrice(text) : null;
+
+                let reason = 'ACCEPT';
+                if (!text) reason = 'EMPTY_TEXT';
+                else if (!types.length && price === null) reason = 'NO_TYPE_AND_PRICE';
+                else if (!types.length) reason = 'NO_TYPE';
+                else if (price === null) reason = 'NO_PRICE';
+
+                return {
+                  index,
+                  time: iso(rawTime),
+                  ageMin: t > 0 ? Math.round((objectDiagNowMs - t) / 60000) : null,
+                  textLen: text.length,
+                  accepted: reason === 'ACCEPT',
+                  reason,
+                  typeCount: types.length,
+                  priceShape: {
+                    rubSymbol: /₽/u.test(text),
+                    rubWord: /руб/iu.test(text),
+                    millionWord: /млн|миллион/iu.test(text),
+                    groupedAmount: /\b\d{1,3}(?:[ \u00A0\u202F]\d{3}){1,2}\b/u.test(text),
+                    compactAmount: /\b\d{6,8}\b/u.test(text),
+                    decimalAmount: /\b\d{1,2}[.,]\d{1,2}\b/u.test(text),
+                  },
+                  typeShape: {
+                    studio: /студ/iu.test(text),
+                    oneRoom: /(?:1\s*[- ]?(?:к|ком)|одноком|однуш)/iu.test(text),
+                    euroTwo: /евро\s*[- ]?2|евродв/iu.test(text),
+                    twoRoom: /(?:2\s*[- ]?(?:к|ком)|двуш|двухком)/iu.test(text),
+                    threeRoom: /(?:3\s*[- ]?(?:к|ком)|тр[её]ш|трехком|трёхком)/iu.test(text),
+                    house: /(?:^|\s)(?:дом|дача|коттедж)(?:\s|$)|таунхаус|дуплекс/iu.test(normalizeText(text)),
+                    apartmentWord: /квартир/iu.test(text),
+                  },
+                };
+              });
+
+              const objectDiagReasonCounts = objectDiagRows.reduce((acc, row) => {
+                acc[row.reason] = (acc[row.reason] || 0) + 1;
+                return acc;
+              }, {});
+
+              const objectDiag24h = objectDiagRows.filter(row =>
+                row.ageMin !== null &&
+                row.ageMin >= -5 &&
+                row.ageMin <= 24 * 60
+              );
+
+              console.log(`OBJECT PIPELINE DIAG: ${JSON.stringify({
+                historyTotal: objectDiagRows.length,
+                acceptedTotal: objectDiagRows.filter(r => r.accepted).length,
+                rejectedTotal: objectDiagRows.filter(r => !r.accepted).length,
+                reasonCounts: objectDiagReasonCounts,
+                within24hTotal: objectDiag24h.length,
+                within24hAccepted: objectDiag24h.filter(r => r.accepted).length,
+                within24hRejected: objectDiag24h.filter(r => !r.accepted).length,
+              })}`);
+
+              console.log(`OBJECT PIPELINE REJECT ROWS: ${JSON.stringify(
+                objectDiagRows.filter(r => !r.accepted)
+              )}`);
+
+              console.log(`OBJECT PIPELINE LAST 50: ${JSON.stringify(
+                objectDiagRows.slice(-50)
+              )}`);
+
               const objects = objectHistory.map(parseObjectMessage).filter(Boolean);
               console.log(`OBJECT SOURCE: PASS title=${OBJECT_CHAT_TITLE} chat_id=${objectCid} messages=${objectHistory.length} objects=${objects.length}`);
 
