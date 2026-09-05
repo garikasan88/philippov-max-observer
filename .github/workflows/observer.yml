@@ -1402,6 +1402,117 @@ jobs:
                 objectDiagRows.slice(-50)
               )}`);
 
+              // SAFE OBJECT RAW STRUCTURE DIAGNOSTIC v1.4.3
+              // Never logs RAW values, sender IDs/names, message IDs, or exact prices.
+              // Only schema paths, primitive types, string lengths, array lengths,
+              // and object key counts are logged. Suspicious/dynamic object keys are redacted.
+              // Target window covers the fresh 38-message burst seen at ~14:09 MSK.
+              function safePathKey(key) {
+                const s = String(key || '');
+                return /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(s) ? s : '<dynamic-key>';
+              }
+
+              function rawShape(value, path = 'rawData', depth = 0, out = [], seen = new WeakSet()) {
+                if (out.length >= 220) return out;
+
+                if (value === null) {
+                  out.push(`${path}:null`);
+                  return out;
+                }
+
+                const t = typeof value;
+
+                if (t === 'string') {
+                  out.push(`${path}:string(len=${value.length})`);
+                  return out;
+                }
+
+                if (t === 'number' || t === 'boolean' || t === 'bigint') {
+                  out.push(`${path}:${t}`);
+                  return out;
+                }
+
+                if (t !== 'object') {
+                  if (t !== 'undefined' && t !== 'function') out.push(`${path}:${t}`);
+                  return out;
+                }
+
+                if (depth >= 9) {
+                  out.push(`${path}:object(depth-limit)`);
+                  return out;
+                }
+
+                if (seen.has(value)) {
+                  out.push(`${path}:circular`);
+                  return out;
+                }
+                seen.add(value);
+
+                if (Array.isArray(value)) {
+                  out.push(`${path}:array(len=${value.length})`);
+                  for (let i = 0; i < Math.min(value.length, 16) && out.length < 220; i++) {
+                    rawShape(value[i], `${path}[${i}]`, depth + 1, out, seen);
+                  }
+                  return out;
+                }
+
+                const keys = Object.keys(value).sort();
+                out.push(`${path}:object(keys=${keys.length})`);
+                for (const key of keys) {
+                  if (out.length >= 220) break;
+                  rawShape(value[key], `${path}.${safePathKey(key)}`, depth + 1, out, seen);
+                }
+                return out;
+              }
+
+              const objectRawWindowStartMs = Date.parse('2026-09-05T11:09:00.000Z');
+              const objectRawWindowEndMs = Date.parse('2026-09-05T11:09:20.000Z');
+
+              const objectRawTargetRows = objectHistory
+                .map((m, index) => ({
+                  index,
+                  rawTime: messageTime(m),
+                  t: toMsTimestamp(messageTime(m)),
+                  textLen: messageText(m).length,
+                  shape: rawShape(m?.rawData),
+                }))
+                .filter(r => r.t >= objectRawWindowStartMs && r.t <= objectRawWindowEndMs);
+
+              const objectRawShapeGroups = new Map();
+              for (const row of objectRawTargetRows) {
+                const key = JSON.stringify(row.shape);
+                const got = objectRawShapeGroups.get(key) || {
+                  count: 0,
+                  indices: [],
+                  firstTime: null,
+                  lastTime: null,
+                  textLens: new Set(),
+                  shape: row.shape,
+                };
+                got.count += 1;
+                if (got.indices.length < 50) got.indices.push(row.index);
+                const t = iso(row.rawTime);
+                if (!got.firstTime) got.firstTime = t;
+                got.lastTime = t;
+                got.textLens.add(row.textLen);
+                objectRawShapeGroups.set(key, got);
+              }
+
+              const objectRawShapeSummary = [...objectRawShapeGroups.values()].map(g => ({
+                count: g.count,
+                indices: g.indices,
+                firstTime: g.firstTime,
+                lastTime: g.lastTime,
+                textLens: [...g.textLens].sort((a, b) => a - b),
+                shape: g.shape,
+              }));
+
+              console.log(`OBJECT RAW STRUCTURE SUMMARY: ${JSON.stringify({
+                targetRows: objectRawTargetRows.length,
+                uniqueShapeCount: objectRawShapeSummary.length,
+                groups: objectRawShapeSummary,
+              })}`);
+
               const objects = objectHistory.map(parseObjectMessage).filter(Boolean);
               console.log(`OBJECT SOURCE: PASS title=${OBJECT_CHAT_TITLE} chat_id=${objectCid} messages=${objectHistory.length} objects=${objects.length}`);
 
