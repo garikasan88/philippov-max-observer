@@ -1330,6 +1330,76 @@ jobs:
               console.log(`OBJECT SOURCE: PASS title=${OBJECT_CHAT_TITLE} chat_id=${objectCid} messages=${objectHistory.length} objects=${objects.length}`);
 
               const nowMs = Date.now();
+
+              // SAFE PIPELINE DIAGNOSTIC v1.4.1
+              // No RAW message text, sender IDs, names, or message IDs are logged.
+              // Purpose: localize where a live request disappears:
+              // timestamp -> self-filter -> text extraction -> parser.
+              function valueType(v) {
+                if (Array.isArray(v)) return 'array';
+                if (v === null) return 'null';
+                return typeof v;
+              }
+
+              const pipelineDiagRows = ordered.map((m, index) => {
+                const rawTime = messageTime(m);
+                const t = toMsTimestamp(rawTime);
+                const text = messageText(m);
+                const parsed = parseObservedMessage(text);
+                const ageMin = t > 0 ? Math.round((nowMs - t) / 60000) : null;
+
+                return {
+                  index,
+                  time: iso(rawTime),
+                  ageMin,
+                  self: senderId(m) === EXPECTED_USER_ID,
+                  textLen: text.length,
+                  kind: parsed?.kind || 'UNKNOWN',
+                  reason: parsed?.reason || 'NO_REASON',
+                  mTextType: valueType(m?.text),
+                  rawTextType: valueType(m?.rawData?.text),
+                  rawMessageType: valueType(m?.rawData?.message),
+                  rawBodyType: valueType(m?.rawData?.body),
+                  rawContentType: valueType(m?.rawData?.content),
+                  rawCaptionType: valueType(m?.rawData?.caption),
+                  rawTimestampType: valueType(m?.rawData?.timestamp),
+                  rawTimeType: valueType(m?.rawData?.time),
+                };
+              });
+
+              const diag24h = pipelineDiagRows.filter(r =>
+                !r.self &&
+                r.ageMin !== null &&
+                r.ageMin >= -5 &&
+                r.ageMin <= 24 * 60
+              );
+
+              const diag3h = diag24h.filter(r => r.ageMin <= 180);
+
+              const diagKindCounts = diag24h.reduce((acc, r) => {
+                acc[r.kind] = (acc[r.kind] || 0) + 1;
+                return acc;
+              }, {});
+
+              const diagReasonCounts = diag24h.reduce((acc, r) => {
+                const key = `${r.kind}:${r.reason}`;
+                acc[key] = (acc[key] || 0) + 1;
+                return acc;
+              }, {});
+
+              console.log(`REQUEST PIPELINE DIAG: ${JSON.stringify({
+                historyTotal: pipelineDiagRows.length,
+                otherSenderTotal: pipelineDiagRows.filter(r => !r.self).length,
+                within24hOther: diag24h.length,
+                within24hOtherTextNonEmpty: diag24h.filter(r => r.textLen > 0).length,
+                within24hOtherTextEmpty: diag24h.filter(r => r.textLen === 0).length,
+                within24hOtherRequests: diag24h.filter(r => r.kind === 'REQUEST').length,
+                kindCounts: diagKindCounts,
+                reasonCounts: diagReasonCounts,
+              })}`);
+
+              console.log(`REQUEST PIPELINE ROWS 3H: ${JSON.stringify(diag3h)}`);
+
               const recentRequests = ordered
                 .filter(m => senderId(m) !== EXPECTED_USER_ID)
                 .filter(m => {
