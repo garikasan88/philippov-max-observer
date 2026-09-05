@@ -1,0 +1,252 @@
+name: PHILIPPOV MAX OBSERVER — PRODUCTION SENSOR
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "*/10 * * * *"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: philippov-max-observer-production-sensor
+  cancel-in-progress: false
+
+jobs:
+  observer:
+    name: 2 groups → parser → objects → MATCH → notify
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    env:
+      MAX_BOOTSTRAP_SECRET: ${{ secrets.MAX_SESSION }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      GH_OWNER: ${{ github.repository_owner }}
+      GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Checkout current PASS observer
+        uses: actions/checkout@v4
+
+      - name: Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Build production SENSOR variants
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SRC="$GITHUB_WORKSPACE/.github/workflows/observer.yml"
+          WORKDIR="$(mktemp -d)"
+          cd "$WORKDIR"
+
+          npm init -y >/dev/null 2>&1
+          npm install --silent --ignore-scripts --omit=optional --no-audit --no-fund webmaxsocket@1.2.7
+
+          python3 - "$SRC" "$WORKDIR" <<'PY'
+          from pathlib import Path
+          import sys
+
+          src_path = Path(sys.argv[1])
+          out_dir = Path(sys.argv[2])
+          src = src_path.read_text(encoding="utf-8")
+
+          marker_start = "cat > observer.cjs <<'JS'\n"
+          marker_end = "\n          JS\n"
+
+          if marker_start not in src or marker_end not in src:
+              raise SystemExit("CURRENT_OBSERVER_JS_BLOCK_NOT_FOUND")
+
+          start = src.index(marker_start) + len(marker_start)
+          end = src.index(marker_end, start)
+          base = src[start:end]
+
+          old_uid = "const EXPECTED_USER_ID = '402668979';"
+          old_cid = "const TARGET_CHAT_ID = '-78471339098233';"
+          old_title = "const TARGET_CHAT_NAME_FALLBACK = 'СКАУТ ТЕСТ';"
+          object_title = "const OBJECT_CHAT_TITLE = 'Мои объекты';"
+
+          for needle in (old_uid, old_cid, old_title, object_title):
+              if needle not in base:
+                  raise SystemExit(f"CURRENT_OBSERVER_EXPECTED_MARKER_MISSING: {needle}")
+
+          base = base.replace(
+              "// Read-only. No send/reply/edit/delete methods are called.",
+              "// Source groups/object chat are read-only. Only MATCH notifications are sent to Igor's direct chat.",
+              1,
+          )
+
+          base = base.replace(
+              object_title,
+              object_title + "\n"
+              "          const NOTIFY_CHAT_ID = '194813989';\n"
+              "          const MAX_NOTIFIED_MATCH_KEYS = 5000;",
+              1,
+          )
+
+          checkpoint_needle = (
+              "              console.log('SESSION CHECKPOINT AFTER LOGIN: PASS');\n\n"
+              "              const cursor = initialCursor;"
+          )
+          if checkpoint_needle not in base:
+              raise SystemExit("SESSION_CHECKPOINT_INSERT_POINT_NOT_FOUND")
+
+          checkpoint_repl = (
+              "              console.log('SESSION CHECKPOINT AFTER LOGIN: PASS');\n\n"
+              "              if (process.env.PHILIPPOV_SMOKE === '1') {\n"
+              "                await client.sendMessage({\n"
+              "                  chatId: Number(NOTIFY_CHAT_ID),\n"
+              "                  text: [\n"
+              "                    'PHILIPPOV OBSERVER',\n"
+              "                    'CONTROL TEST: PASS',\n"
+              "                    'SENSOR: Светлана',\n"
+              "                    'Режим: 2 группы → parser → 38 объектов → MATCH → DEDUP → личное уведомление',\n"
+              "                  ].join('\\n'),\n"
+              "                });\n"
+              "                console.log('NOTIFY SMOKE: PASS chat_id=' + NOTIFY_CHAT_ID);\n"
+              "              }\n\n"
+              "              const cursor = initialCursor;"
+          )
+          base = base.replace(checkpoint_needle, checkpoint_repl, 1)
+
+          live_needle = (
+              "              console.log(`LIVE MATCH DRY: PASS requests=${recentRequests.length} "
+              "objects=${objects.length} matches=${liveMatches.length}`);\n\n"
+              "              if (liveMatches.length) {"
+          )
+          if live_needle not in base:
+              raise SystemExit("LIVE_MATCH_INSERT_POINT_NOT_FOUND")
+
+          live_repl = r'''              console.log(`LIVE MATCH DRY: PASS requests=${recentRequests.length} objects=${objects.length} matches=${liveMatches.length}`);
+
+              // PRODUCTION MATCH DEDUP + DIRECT NOTIFICATION
+              const notifiedKeys = new Set(
+                Array.isArray(cursor.notifiedMatchKeys)
+                  ? cursor.notifiedMatchKeys.map(String)
+                  : []
+              );
+
+              const notifyMatches = liveMatches.filter(m => {
+                const key = `${cid}|${m.requestMessageId}|${m.objectId}`;
+                return !notifiedKeys.has(key);
+              });
+
+              console.log(
+                `MATCH NOTIFY DEDUP: live=${liveMatches.length} new=${notifyMatches.length} remembered=${notifiedKeys.size}`
+              );
+
+              if (notifyMatches.length) {
+                const clip = (value, max) => {
+                  const s = String(value ?? '').trim();
+                  if (!s) return 'НЕ УСТАНОВЛЕНО';
+                  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
+                };
+
+                const rub = value => {
+                  const n = Number(value);
+                  if (!Number.isFinite(n)) return 'НЕ УСТАНОВЛЕНО';
+                  return `${Math.round(n).toLocaleString('ru-RU')} ₽`;
+                };
+
+                for (const m of notifyMatches) {
+                  const req = m.request || {};
+                  const obj = m.object || {};
+
+                  const notifyText = [
+                    'PHILIPPOV MATCH',
+                    '',
+                    `Группа: ${group}`,
+                    `Запрос от: ${m.requestSender || 'НЕ УСТАНОВЛЕНО'}`,
+                    `Время запроса: ${m.requestTime || 'НЕ УСТАНОВЛЕНО'}`,
+                    '',
+                    'ЗАПРОС:',
+                    clip(req.raw, 850),
+                    '',
+                    'НАШ ОБЪЕКТ:',
+                    clip(obj.sourceText || obj?.profile?.address || m.objectId, 1100),
+                    '',
+                    `Цена объекта: ${rub(obj.price)}`,
+                    `Площадь: ${obj.area ?? 'НЕ УСТАНОВЛЕНО'}`,
+                    `Совпало по: ${Array.isArray(m.reasons) && m.reasons.length ? m.reasons.join(', ') : 'MATCH'}`,
+                  ].join('\n');
+
+                  await client.sendMessage({
+                    chatId: Number(NOTIFY_CHAT_ID),
+                    text: notifyText,
+                  });
+
+                  const key = `${cid}|${m.requestMessageId}|${m.objectId}`;
+                  notifiedKeys.add(key);
+                  console.log(`MATCH NOTIFY: PASS key=${key}`);
+                }
+
+                cursor.notifiedMatchKeys = [...notifiedKeys].slice(-MAX_NOTIFIED_MATCH_KEYS);
+                cursor.updatedAt = new Date().toISOString();
+
+                persistentSession = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
+                await saveState(stateIssue.number, cursor, persistentSession);
+                console.log(`MATCH NOTIFY STATE: PASS remembered=${cursor.notifiedMatchKeys.length}`);
+              }
+
+              if (notifyMatches.length) {'''
+          base = base.replace(live_needle, live_repl, 1)
+
+          if "const encryptedMatches = encryptSession(liveMatches, BOOTSTRAP_RAW);" not in base:
+              raise SystemExit("MATCH_FEED_ENCRYPT_MARKER_NOT_FOUND")
+          base = base.replace(
+              "const encryptedMatches = encryptSession(liveMatches, BOOTSTRAP_RAW);",
+              "const encryptedMatches = encryptSession(notifyMatches, BOOTSTRAP_RAW);",
+              1,
+          )
+
+          if "`MATCH DRY: ${liveMatches.length} MATCH(ES) — ENCRYPTED`" not in base:
+              raise SystemExit("MATCH_FEED_COUNT_MARKER_NOT_FOUND")
+          base = base.replace(
+              "`MATCH DRY: ${liveMatches.length} MATCH(ES) — ENCRYPTED`",
+              "`MATCH NOTIFY: ${notifyMatches.length} NEW MATCH(ES) — ENCRYPTED`",
+              1,
+          )
+
+          variants = [
+              ("requests", "-70193851621530", "ЗАПРОСЫ"),
+              ("krasnodar", "-69236834721964", "Запросы Краснодар"),
+          ]
+
+          for tag, cid, title in variants:
+              v = base
+              v = v.replace(old_uid, "const EXPECTED_USER_ID = '140053596';", 1)
+              v = v.replace(old_cid, f"const TARGET_CHAT_ID = '{cid}';", 1)
+              v = v.replace(
+                  old_title,
+                  f"const TARGET_CHAT_NAME_FALLBACK = {title!r};",
+                  1,
+              )
+
+              path = out_dir / f"observer_prod_{tag}.cjs"
+              path.write_text(v, encoding="utf-8")
+              print(f"PRODUCTION VARIANT BUILT: {tag} chat_id={cid} title={title}")
+          PY
+
+          node --check observer_prod_requests.cjs
+          node --check observer_prod_krasnodar.cjs
+          echo "PRODUCTION VARIANT SYNTAX: PASS"
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            export PHILIPPOV_SMOKE=1
+          else
+            export PHILIPPOV_SMOKE=0
+          fi
+
+          echo "========== PRODUCTION GROUP 1: ЗАПРОСЫ =========="
+          timeout --signal=TERM --kill-after=5s 110s node observer_prod_requests.cjs
+
+          export PHILIPPOV_SMOKE=0
+
+          echo "========== PRODUCTION GROUP 2: Запросы Краснодар =========="
+          timeout --signal=TERM --kill-after=5s 110s node observer_prod_krasnodar.cjs
+
+          echo "PHILIPPOV MAX OBSERVER PRODUCTION SENSOR: COMPLETE"
