@@ -50,7 +50,7 @@ jobs:
           const { WebMaxClient } = require('webmaxsocket');
 
           // ------------------------------------------------------------
-          // PHILIPPOV MAX OBSERVER V2 FINAL + LIVE OBJECT MATCH DRY v1.4
+          // PHILIPPOV MAX OBSERVER V2 FINAL + LIVE OBJECT MATCH DRY v1.4.4
           // Read-only. No send/reply/edit/delete methods are called.
           // One target account + one confirmed test chat.
           // ------------------------------------------------------------
@@ -257,7 +257,8 @@ jobs:
             return (
               textFromValue(m?.text) ||
               textFromValue(m?.rawData?.text) ||
-              textFromValue(m?.rawData?.message)
+              textFromValue(m?.rawData?.message) ||
+              textFromValue(m?.rawData)
             );
           }
 
@@ -594,6 +595,63 @@ jobs:
             return [...types];
           }
           
+
+          // OBJECT TYPE PARSER v1.4.4 — object-source only.
+          // Keeps the CLOSED request parser unchanged and broadens only live object classification.
+          function parseObjectTypes(text) {
+            const raw = String(text ?? "");
+            const norm = normalizeText(raw);
+            const types = new Set(parseRequestTypes(raw));
+
+            const addRoomCount = n => {
+              const v = Number(n);
+              if (Number.isInteger(v) && v >= 1 && v <= 9) types.add(`${v}k`);
+            };
+
+            // Numeric room forms: 2-комнатная, 2 х комнатная, 2х-комн., 4 ккв, etc.
+            for (const m of norm.matchAll(/(?:^|\s)([1-9])\s*(?:х\s*)?(?:к\s*кв|ккв|комн|комнат|квартира)/giu)) {
+              addRoomCount(m[1]);
+            }
+
+            // Word room forms missed by the request parser.
+            if (/однокомнат|однокомн/iu.test(norm)) types.add("1k");
+            if (/двухкомнат|двухкомн|двукомнат/iu.test(norm)) types.add("2k");
+            if (/тр[её]хкомнат|тр[её]хкомн/iu.test(norm)) types.add("3k");
+            if (/четыр[её]хкомнат|четыр[её]хкомн/iu.test(norm)) types.add("4k");
+            if (/пятикомнат|пятикомн/iu.test(norm)) types.add("5k");
+            if (/шестикомнат|шестикомн/iu.test(norm)) types.add("6k");
+
+            // Euro-layout forms are kept distinct so MATCH never silently equates them with classic room counts.
+            for (const m of norm.matchAll(/евро\s*([2-6])(?:\s|$)/giu)) types.add(`euro${m[1]}`);
+            if (/евродв|евро\s*дв/iu.test(norm)) types.add("euro2");
+            if (/евротр[её]ш|евро\s*тр[её]ш/iu.test(norm)) types.add("euro3");
+            if (/еврочетыр|евро\s*четыр/iu.test(norm)) types.add("euro4");
+
+            // Other legitimate object classes. They stay in the object source;
+            // current MVP request scope still prevents unsupported request classes from matching.
+            if (/апартамент|апарт\s*отел/iu.test(norm)) types.add("apartments");
+            if (/пентхаус/iu.test(norm)) types.add("penthouse");
+            if (/комната|комнату|комнаты|комнате/iu.test(norm) && ![...types].some(t => /^(?:[1-9]k|euro[2-6])$/.test(t))) types.add("room");
+            if (/гараж|машино\s*мест|машиномест|паркинг/iu.test(norm)) types.add("parking");
+            if (/участок|земельн|земля/iu.test(norm) && !types.has("house") && !types.has("ground-format")) types.add("land");
+            if (/офис|торгов(?:ое|ая)\s+помещ|склад|помещение\s+свободн|коммерц|общепит|нежил/iu.test(norm)) types.add("commercial");
+
+            return [...types];
+          }
+
+          function objectTypeSelfTest() {
+            const fail = (name, got) => { throw new Error(`OBJECT TYPE SELFTEST ${name}: ${JSON.stringify(got)}`); };
+            const must = (name, text, type) => { const got = parseObjectTypes(text); if (!got.includes(type)) fail(name, got); };
+            must('2x-room', '2-х комнатная квартира', '2k');
+            must('4-room', '4-комнатная квартира', '4k');
+            must('euro3', 'Евро-3', 'euro3');
+            must('apartments', 'Апартаменты', 'apartments');
+            must('room', 'Комната 18 м²', 'room');
+            must('parking', 'Машиноместо в паркинге', 'parking');
+            must('land', 'Участок 6 соток', 'land');
+            return 'OBJECT_TYPE_BROAD_PASS';
+          }
+
           function parseAreaConstraint(text) {
             const raw = String(text ?? "");
             let min = null, max = null, preferred = null;
@@ -894,7 +952,7 @@ jobs:
           function parseObjectMessage(m) {
             const raw = messageText(m).trim();
             if (!raw) return null;
-            const types = parseRequestTypes(raw);
+            const types = parseObjectTypes(raw);
             const price = parseObjectPrice(raw);
             if (!types.length || price === null) return null;
             const fl = parseObjectFloor(raw);
@@ -1102,6 +1160,8 @@ jobs:
               console.log(`MVP SCOPE SELFTEST: ${scopeStatus}`);
               const objectMatchStatus = objectMatchSelfTest();
               console.log(`OBJECT MATCH SELFTEST: ${objectMatchStatus}`);
+              const objectTypeStatus = objectTypeSelfTest();
+              console.log(`OBJECT TYPE SELFTEST: ${objectTypeStatus}`);
 
               // GitHub preflight BEFORE MAX login, so a rotated token is never lost
               // because of a missing GitHub permission.
@@ -1336,7 +1396,7 @@ jobs:
                 const rawTime = messageTime(m);
                 const t = toMsTimestamp(rawTime);
                 const text = messageText(m).trim();
-                const types = text ? parseRequestTypes(text) : [];
+                const types = text ? parseObjectTypes(text) : [];
                 const price = text ? parseObjectPrice(text) : null;
 
                 let reason = 'ACCEPT';
@@ -1365,8 +1425,15 @@ jobs:
                     studio: /студ/iu.test(text),
                     oneRoom: /(?:1\s*[- ]?(?:к|ком)|одноком|однуш)/iu.test(text),
                     euroTwo: /евро\s*[- ]?2|евродв/iu.test(text),
+                    euroThreePlus: /евро\s*[- ]?[3-6]|евротр[её]ш|еврочетыр/iu.test(text),
                     twoRoom: /(?:2\s*[- ]?(?:к|ком)|двуш|двухком)/iu.test(text),
                     threeRoom: /(?:3\s*[- ]?(?:к|ком)|тр[её]ш|трехком|трёхком)/iu.test(text),
+                    fourPlusRoom: /(?:[4-9]\s*(?:[- ]?(?:к|ком)|\s*(?:х\s*)?комнат)|четыр[её]хком|пятиком|шестиком)/iu.test(normalizeText(text)),
+                    apartments: /апартамент|апарт\s*отел/iu.test(text),
+                    roomOnly: /комната|комнату|комнаты/iu.test(text),
+                    parking: /гараж|машино\s*мест|машиномест|паркинг/iu.test(text),
+                    land: /участок|земельн|земля/iu.test(text),
+                    commercial: /офис|склад|коммерц|общепит|нежил/iu.test(text),
                     house: /(?:^|\s)(?:дом|дача|коттедж)(?:\s|$)|таунхаус|дуплекс/iu.test(normalizeText(text)),
                     apartmentWord: /квартир/iu.test(text),
                   },
@@ -1515,6 +1582,8 @@ jobs:
 
               const objects = objectHistory.map(parseObjectMessage).filter(Boolean);
               console.log(`OBJECT SOURCE: PASS title=${OBJECT_CHAT_TITLE} chat_id=${objectCid} messages=${objectHistory.length} objects=${objects.length}`);
+              const freshObjectDiag = objectDiagRows.filter(r => r.ageMin !== null && r.ageMin >= -5 && r.ageMin <= 180);
+              console.log(`OBJECT CURRENT SUMMARY: ${JSON.stringify({freshRows:freshObjectDiag.length,freshAccepted:freshObjectDiag.filter(r=>r.accepted).length,freshRejected:freshObjectDiag.filter(r=>!r.accepted).length,reasons:freshObjectDiag.reduce((a,r)=>(a[r.reason]=(a[r.reason]||0)+1,a),{})})}`);
 
               const nowMs = Date.now();
 
