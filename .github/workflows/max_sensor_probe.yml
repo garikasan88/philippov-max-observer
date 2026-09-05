@@ -1,0 +1,141 @@
+name: PHILIPPOV MAX SENSOR — QR PROBE
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Sensor QR access probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+
+    steps:
+      - name: Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: QR login and read-only access check
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKDIR="$(mktemp -d)"
+          cd "$WORKDIR"
+
+          npm init -y >/dev/null 2>&1
+          npm install --silent --ignore-scripts --omit=optional --no-audit --no-fund webmaxsocket@1.2.7
+
+          cat > sensor-probe.cjs <<'JS'
+          'use strict';
+
+          const { WebMaxClient } = require('webmaxsocket');
+
+          const CHATS = [
+            { kind: 'REQUEST', title: 'ЗАПРОСЫ', chatId: -70193851621530, limit: 100 },
+            { kind: 'REQUEST', title: 'Запросы Краснодар', chatId: -69236834721964, limit: 100 },
+            { kind: 'OBJECT', title: 'Мои объекты', chatId: -75607874388089, limit: 120 },
+          ];
+
+          function textFromValue(value, depth = 0) {
+            if (typeof value === 'string') return value;
+            if (!value || typeof value !== 'object' || depth > 4) return '';
+
+            for (const key of ['text', 'message', 'caption', 'body', 'content']) {
+              const nested = value[key];
+
+              if (typeof nested === 'string' && nested.trim()) return nested;
+
+              if (nested && typeof nested === 'object') {
+                const found = textFromValue(nested, depth + 1);
+                if (found) return found;
+              }
+            }
+
+            return '';
+          }
+
+          function messageText(m) {
+            return (
+              textFromValue(m?.text) ||
+              textFromValue(m?.rawData?.text) ||
+              textFromValue(m?.rawData?.message) ||
+              textFromValue(m?.rawData)
+            );
+          }
+
+          function messageTime(m) {
+            const n = Number(m?.timestamp ?? m?.rawData?.time ?? m?.time ?? 0);
+            return Number.isFinite(n) && n > 0 ? n : 0;
+          }
+
+          function summarize(rows) {
+            const arr = Array.isArray(rows) ? rows : [];
+            const times = arr.map(messageTime).filter(Boolean);
+
+            return {
+              historyTotal: arr.length,
+              textNonEmpty: arr.filter(m => messageText(m).trim().length > 0).length,
+              textEmpty: arr.filter(m => messageText(m).trim().length === 0).length,
+              newestTime: times.length
+                ? new Date(Math.max(...times)).toISOString()
+                : 'UNKNOWN',
+            };
+          }
+
+          async function main() {
+            console.log('SENSOR PROBE: WAITING FOR QR SCAN');
+            console.log('MAX: Профиль → Устройства / Безопасность → Подключить устройство → отсканируйте QR ниже.');
+
+            const client = new WebMaxClient({
+              name: 'philippov_max_sensor_probe',
+              deviceType: 'WEB',
+              saveToken: false,
+              sessionBackup: false,
+            });
+
+            await client.start();
+
+            const accountId = client?.me?.id ?? 'UNKNOWN';
+            const accountName =
+              client?.me?.fullname ||
+              client?.me?.name ||
+              'UNKNOWN';
+
+            console.log(`SENSOR LOGIN: PASS account=${accountName} user_id=${accountId}`);
+
+            for (const chat of CHATS) {
+              try {
+                const rows = await client.getHistory(
+                  chat.chatId,
+                  Date.now(),
+                  chat.limit,
+                  0,
+                );
+
+                console.log(
+                  `SENSOR ${chat.kind} CHAT: ${chat.title} ${JSON.stringify(summarize(rows))}`,
+                );
+              } catch (e) {
+                console.log(
+                  `SENSOR ${chat.kind} CHAT: ${chat.title} ERROR=${String(e?.message || e).slice(0, 300)}`,
+                );
+              }
+            }
+
+            console.log('SENSOR PROBE: COMPLETE');
+            process.exit(0);
+          }
+
+          main().catch(err => {
+            console.error(
+              `SENSOR PROBE: FAIL ${String(err?.message || err).slice(0, 800)}`,
+            );
+            process.exit(1);
+          });
+          JS
+
+          node --check sensor-probe.cjs
+          timeout --signal=TERM --kill-after=5s 360s node sensor-probe.cjs
