@@ -1,92 +1,539 @@
-name: MAX Observer
+name: PHILIPPOV MAX OBSERVER — WORKING ONE-SHOT
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 permissions:
   contents: read
-  actions: write
+  issues: write
 
 concurrency:
-  group: max-observer-continuous
-  cancel-in-progress: false
+  group: philippov-max-observer-v2-final
+  cancel-in-progress: true
 
 jobs:
-  observer:
+  observe:
+    name: Observer read-only
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 2
+
+    env:
+      MAX_BOOTSTRAP_SECRET: ${{ secrets.MAX_SESSION }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      GH_OWNER: ${{ github.repository_owner }}
+      GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - name: Node 24
+        uses: actions/setup-node@v7
         with:
-          node-version: '24'
-          cache: 'npm'
+          node-version: "24"
 
-      - run: npm ci
-
-      - name: Restore MAX session
-        env:
-          MAX_SESSION: ${{ secrets.MAX_SESSION }}
-        run: printf '%s' "$MAX_SESSION" > .max-session.json
-
-      - name: One MAX check
+      - name: MAX Observer V2 FINAL
         shell: bash
         run: |
           set -euo pipefail
 
-          hour=$((10#$(TZ=Europe/Moscow date +%H)))
+          WORKDIR="$(mktemp -d)"
+          cd "$WORKDIR"
 
-          echo "МОСКОВСКОЕ ВРЕМЯ: $(TZ=Europe/Moscow date)"
+          npm init -y >/dev/null 2>&1
+          npm install --silent --ignore-scripts --omit=optional --no-audit --no-fund webmaxsocket@1.2.7
 
-          if (( hour >= 22 || hour < 6 )); then
+          cat > observer.cjs <<'JS'
+          'use strict';
 
-            echo "НОЧНОЙ РЕЖИМ MAX: 22:00–06:00"
-            echo "MAX НЕ ПРОВЕРЯЕМ"
+          const fs = require('fs');
+          const path = require('path');
+          const crypto = require('crypto');
+          const { WebMaxClient } = require('webmaxsocket');
 
-            now=$(TZ=Europe/Moscow date +%s)
+          // ------------------------------------------------------------
+          // PHILIPPOV MAX OBSERVER V2 FINAL
+          // Read-only. No send/reply/edit/delete methods are called.
+          // One target account + one confirmed test chat.
+          // ------------------------------------------------------------
 
-            if (( hour >= 22 )); then
-              target=$(TZ=Europe/Moscow date -d 'tomorrow 06:00:00' +%s)
-            else
-              target=$(TZ=Europe/Moscow date -d 'today 06:00:00' +%s)
-            fi
+          const EXPECTED_USER_ID = '402668979';
+          const TARGET_CHAT_ID = '-78471339098233';
+          const TARGET_CHAT_NAME_FALLBACK = 'СКАУТ ТЕСТ';
 
-            wait_seconds=$((target - now))
+          const STATE_TITLE = '[STATE] PHILIPPOV MAX OBSERVER V2 FINAL';
+          const FEED_TITLE = 'PHILIPPOV MAX OBSERVER — REQUEST FEED';
+          const BLOCKER_TITLE = 'PHILIPPOV MAX OBSERVER — BLOCKER';
+          const SESSION_NAME = 'philippov_max_observer_v2_final';
+          const SESSION_FILE = path.join(process.cwd(), 'sessions', `${SESSION_NAME}.json`);
 
-            # GitHub job не держим всю ночь одним куском.
-            if (( wait_seconds > 14400 )); then
-              wait_seconds=14400
-            fi
+          const GH_TOKEN = String(process.env.GH_TOKEN || '');
+          const GH_REPO = String(process.env.GH_REPO || '');
+          const GH_OWNER = String(process.env.GH_OWNER || 'garikasan88');
+          const GH_RUN_URL = String(process.env.GH_RUN_URL || '');
+          const BOOTSTRAP_RAW = String(process.env.MAX_BOOTSTRAP_SECRET || '').trim();
 
-            if (( wait_seconds > 0 )); then
-              echo "MAX СПИТ. ЖДЁМ $wait_seconds СЕКУНД."
-              sleep "$wait_seconds"
-            fi
+          const HISTORY_BACKWARD = 500;
+          const MAX_SEEN_IDS = 3000;
 
-          else
+          if (!GH_TOKEN || !GH_REPO) throw new Error('GITHUB_CONTEXT_MISSING');
+          if (!BOOTSTRAP_RAW) throw new Error('MAX_SESSION_EMPTY');
 
-            lookback=40
+          function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+          }
 
-            # Утренняя проверка забирает сообщения за ночь.
-            if (( hour == 6 )); then
-              lookback=540
-              echo "УТРЕННИЙ ДОБОР НОЧНЫХ СООБЩЕНИЙ"
-            fi
+          function bootstrapToken(raw) {
+            const s = String(raw || '').trim();
+            if (!s) return '';
+            try {
+              const x = JSON.parse(s);
+              if (typeof x === 'string') return x.trim();
+              for (const k of ['token', 'access_token', 'accessToken', 'auth_token', 'authToken']) {
+                if (typeof x?.[k] === 'string' && x[k].trim()) return x[k].trim();
+              }
+            } catch {}
+            return s;
+          }
 
-            echo "ГЛУБИНА ПРОВЕРКИ: $lookback МИНУТ"
+          const BOOTSTRAP_TOKEN = bootstrapToken(BOOTSTRAP_RAW);
+          if (!BOOTSTRAP_TOKEN) throw new Error('MAX_SESSION_TOKEN_EMPTY');
 
-            LOOKBACK_MINUTES="$lookback" node observer.mjs
+          const API = `https://api.github.com/repos/${GH_REPO}`;
 
-            echo "ПРОВЕРКА MAX ЗАВЕРШЕНА"
-            echo "СЛЕДУЮЩАЯ ПРОВЕРКА ЧЕРЕЗ 30 МИНУТ"
+          async function gh(urlPath, { method = 'GET', body = null } = {}) {
+            let last = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                const res = await fetch(`${API}${urlPath}`, {
+                  method,
+                  headers: {
+                    Authorization: `Bearer ${GH_TOKEN}`,
+                    Accept: 'application/vnd.github+json',
+                    'X-GitHub-Api-Version': '2022-11-28',
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'PHILIPPOV-MAX-OBSERVER-V2-FINAL',
+                  },
+                  body: body == null ? undefined : JSON.stringify(body),
+                });
+                const text = await res.text();
+                let data = null;
+                try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+                if (!res.ok) throw new Error(`GitHub API ${method} ${urlPath}: HTTP ${res.status}`);
+                return data;
+              } catch (e) {
+                last = e;
+                if (attempt < 3) await sleep(attempt * 750);
+              }
+            }
+            throw last;
+          }
 
-            sleep 1800
-          fi
+          async function findIssueByTitle(title) {
+            for (let page = 1; page <= 5; page++) {
+              const rows = await gh(`/issues?state=all&per_page=100&page=${page}`);
+              const hit = rows.find(x => !x.pull_request && x.title === title);
+              if (hit) return hit;
+              if (rows.length < 100) break;
+            }
+            return null;
+          }
 
-      - name: Start next MAX check
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run observer.yml --ref main
+          function parseCursor(body) {
+            const m = String(body || '').match(/<!--PHILIPPOV_CURSOR_V2_FINAL\n([\s\S]*?)\nPHILIPPOV_CURSOR_V2_FINAL-->/);
+            if (!m) return { version: 2, chats: {} };
+            try {
+              const x = JSON.parse(m[1]);
+              if (!x || typeof x !== 'object') return { version: 2, chats: {} };
+              if (!x.chats || typeof x.chats !== 'object') x.chats = {};
+              return x;
+            } catch {
+              return { version: 2, chats: {} };
+            }
+          }
+
+          function parseEncryptedSession(body) {
+            const m = String(body || '').match(/<!--PHILIPPOV_SESSION_ENC_V2_FINAL\n([\s\S]*?)\nPHILIPPOV_SESSION_ENC_V2_FINAL-->/);
+            if (!m) return null;
+            try { return JSON.parse(m[1]); } catch { return null; }
+          }
+
+          function encryptionKey(secret) {
+            return crypto
+              .createHash('sha256')
+              .update(`PHILIPPOV_MAX_OBSERVER_V2_FINAL\0${secret}`)
+              .digest();
+          }
+
+          function keyId(secret) {
+            return crypto
+              .createHash('sha256')
+              .update(`PHILIPPOV_MAX_OBSERVER_V2_FINAL_ID\0${secret}`)
+              .digest('hex')
+              .slice(0, 16);
+          }
+
+          function encryptSession(session, secret) {
+            const iv = crypto.randomBytes(12);
+            const cipher = crypto.createCipheriv('aes-256-gcm', encryptionKey(secret), iv);
+            const cipherText = Buffer.concat([
+              cipher.update(Buffer.from(JSON.stringify(session), 'utf8')),
+              cipher.final(),
+            ]);
+            return {
+              v: 1,
+              keyId: keyId(secret),
+              iv: iv.toString('base64'),
+              tag: cipher.getAuthTag().toString('base64'),
+              data: cipherText.toString('base64'),
+            };
+          }
+
+          function decryptSession(envelope, secret) {
+            if (!envelope || envelope.v !== 1 || envelope.keyId !== keyId(secret)) return null;
+            try {
+              const decipher = crypto.createDecipheriv(
+                'aes-256-gcm',
+                encryptionKey(secret),
+                Buffer.from(envelope.iv, 'base64'),
+              );
+              decipher.setAuthTag(Buffer.from(envelope.tag, 'base64'));
+              const plain = Buffer.concat([
+                decipher.update(Buffer.from(envelope.data, 'base64')),
+                decipher.final(),
+              ]).toString('utf8');
+              return JSON.parse(plain);
+            } catch {
+              return null;
+            }
+          }
+
+          function stateBody(cursor, encryptedSession) {
+            return [
+              'PHILIPPOV MAX OBSERVER V2 FINAL — service state.',
+              'MAX session below is AES-256-GCM encrypted.',
+              '',
+              '<!--PHILIPPOV_CURSOR_V2_FINAL',
+              JSON.stringify(cursor),
+              'PHILIPPOV_CURSOR_V2_FINAL-->',
+              '',
+              '<!--PHILIPPOV_SESSION_ENC_V2_FINAL',
+              encryptedSession ? JSON.stringify(encryptedSession) : 'null',
+              'PHILIPPOV_SESSION_ENC_V2_FINAL-->',
+            ].join('\n');
+          }
+
+          function messageId(m) {
+            return String(m?.id ?? m?.rawData?.id ?? m?.messageId ?? '').trim();
+          }
+
+          function messageTime(m) {
+            const n = Number(m?.timestamp ?? m?.rawData?.time ?? m?.time ?? 0);
+            return Number.isFinite(n) && n > 0 ? n : 0;
+          }
+
+          function messageText(m) {
+            return typeof m?.text === 'string' ? m.text : '';
+          }
+
+          function senderId(m) {
+            const raw = m?.rawData?.sender;
+            const value =
+              m?.senderId ??
+              (raw && typeof raw === 'object' ? raw.id : raw) ??
+              m?.rawData?.senderId ??
+              m?.rawData?.sender_id ??
+              'UNKNOWN';
+            return String(value);
+          }
+
+          function senderName(m) {
+            try {
+              if (typeof m?.getSenderName === 'function') {
+                const n = String(m.getSenderName() || '').trim();
+                if (n && n !== 'Unknown') return n;
+              }
+            } catch {}
+            const raw = m?.rawData?.sender;
+            if (raw && typeof raw === 'object') {
+              const n = raw.fullname || raw.full_name || raw.name ||
+                [raw.first_name, raw.last_name].filter(Boolean).join(' ');
+              if (n) return String(n);
+            }
+            return 'UNKNOWN';
+          }
+
+          function compactSeen(ids) {
+            return [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))]
+              .slice(-MAX_SEEN_IDS);
+          }
+
+          function iso(t) {
+            const n = Number(t || 0);
+            if (!n) return 'UNKNOWN';
+            try {
+              return new Date(n < 10_000_000_000 ? n * 1000 : n).toISOString();
+            } catch {
+              return 'UNKNOWN';
+            }
+          }
+
+          async function ensureIssue(title, body) {
+            let issue = await findIssueByTitle(title);
+            if (!issue) {
+              issue = await gh('/issues', { method: 'POST', body: { title, body } });
+            }
+            return issue;
+          }
+
+          async function saveState(issueNumber, cursor, session) {
+            const encrypted = session ? encryptSession(session, BOOTSTRAP_RAW) : null;
+            await gh(`/issues/${issueNumber}`, {
+              method: 'PATCH',
+              body: { body: stateBody(cursor, encrypted), state: 'closed' },
+            });
+          }
+
+          async function blocker(error) {
+            const text = String(error?.message || error || 'UNKNOWN').slice(0, 1200);
+            const body = [
+              `@${GH_OWNER}`,
+              '',
+              'PHILIPPOV MAX OBSERVER V2 FINAL — BLOCKER',
+              `Ошибка: ${text}`,
+              `Запуск: ${GH_RUN_URL}`,
+              '',
+              'Fisherman / рассылка не изменялись.',
+            ].join('\n');
+            let issue = await findIssueByTitle(BLOCKER_TITLE);
+            if (!issue) {
+              issue = await gh('/issues', { method: 'POST', body: { title: BLOCKER_TITLE, body } });
+            } else {
+              await gh(`/issues/${issue.number}`, { method: 'PATCH', body: { body, state: 'open' } });
+            }
+          }
+
+          async function closeBlocker() {
+            const issue = await findIssueByTitle(BLOCKER_TITLE);
+            if (issue?.state === 'open') {
+              await gh(`/issues/${issue.number}`, { method: 'PATCH', body: { state: 'closed' } });
+            }
+          }
+
+          async function main() {
+            let client = null;
+            try {
+              // GitHub preflight BEFORE MAX login, so a rotated token is never lost
+              // because of a missing GitHub permission.
+              let stateIssue = await findIssueByTitle(STATE_TITLE);
+              const initialCursor = stateIssue ? parseCursor(stateIssue.body) : { version: 2, chats: {} };
+              const encrypted = stateIssue ? parseEncryptedSession(stateIssue.body) : null;
+              const restoredSession = decryptSession(encrypted, BOOTSTRAP_RAW);
+
+              if (!stateIssue) {
+                stateIssue = await ensureIssue(STATE_TITLE, stateBody(initialCursor, null));
+                await gh(`/issues/${stateIssue.number}`, { method: 'PATCH', body: { state: 'closed' } });
+              }
+
+              const feedIssue = await ensureIssue(
+                FEED_TITLE,
+                [
+                  `@${GH_OWNER}`,
+                  '',
+                  'PHILIPPOV MAX OBSERVER V2 FINAL',
+                  'READ ONLY',
+                  'PUBLIC REPO SAFETY: RAW MAX TEXT IS STORED ONLY ENCRYPTED',
+                  `TARGET CHAT: ${TARGET_CHAT_NAME_FALLBACK} [${TARGET_CHAT_ID}]`,
+                ].join('\n'),
+              );
+
+              fs.mkdirSync(path.dirname(SESSION_FILE), { recursive: true });
+              if (restoredSession && typeof restoredSession === 'object') {
+                fs.writeFileSync(SESSION_FILE, JSON.stringify(restoredSession, null, 2), 'utf8');
+                console.log('SESSION RESTORE: PASS');
+              } else {
+                console.log('SESSION RESTORE: bootstrap');
+              }
+
+              const tokenForRun = restoredSession?.token
+                ? String(restoredSession.token).trim()
+                : BOOTSTRAP_TOKEN;
+
+              if (!tokenForRun) throw new Error('NO_TOKEN_FOR_MAX_LOGIN');
+
+              client = new WebMaxClient({
+                name: SESSION_NAME,
+                token: tokenForRun,
+                deviceType: 'WEB',
+                saveToken: true,
+                clearSessionOnFailedSync: false,
+                sessionBackup: true,
+                debug: false,
+                logIncoming: false,
+                maxReconnectAttempts: 0,
+                reconnectDelay: 1000,
+                timezone: 'Europe/Moscow',
+              });
+
+              await client.start();
+
+              const actualUserId = String(
+                client?.me?.id ?? client?.session?.get?.('userId') ?? 'UNKNOWN'
+              );
+              const actualName =
+                client?.me?.fullname ||
+                client?.me?.firstname ||
+                'UNKNOWN';
+
+              if (actualUserId !== EXPECTED_USER_ID) {
+                throw new Error(
+                  `WRONG_MAX_ACCOUNT expected=${EXPECTED_USER_ID} got=${actualUserId}`
+                );
+              }
+
+              console.log(`MAX LOGIN: PASS account=${actualName} user_id=${actualUserId}`);
+
+              if (!fs.existsSync(SESSION_FILE)) {
+                throw new Error('MAX_SESSION_FILE_NOT_CREATED');
+              }
+
+              // IMPORTANT: persist rotated token + stable deviceId IMMEDIATELY after login,
+              // before chat/history work. This closes the failure mode of V1.
+              let persistentSession = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
+              if (!persistentSession?.token || !persistentSession?.deviceId) {
+                throw new Error('MAX_SESSION_FILE_INCOMPLETE');
+              }
+              await saveState(stateIssue.number, initialCursor, persistentSession);
+              console.log('SESSION CHECKPOINT AFTER LOGIN: PASS');
+
+              const cursor = initialCursor;
+              const cid = TARGET_CHAT_ID;
+              let chatState = cursor.chats[cid];
+              let group = chatState?.group || TARGET_CHAT_NAME_FALLBACK;
+
+              try {
+                const info = await client.getChatInfo([Number(cid)]);
+                const chats = info?.chats || info?.payload?.chats || (Array.isArray(info) ? info : []);
+                const hit = Array.isArray(chats)
+                  ? chats.find(x => String(x?.id) === cid)
+                  : null;
+                if (hit?.title) group = String(hit.title);
+              } catch (e) {
+                console.log(`CHAT INFO WARN: ${e.message}`);
+              }
+
+              const history = await client.getHistory(Number(cid), Date.now(), HISTORY_BACKWARD, 0);
+              if (!Array.isArray(history)) throw new Error('MAX_HISTORY_NOT_ARRAY');
+
+              const ordered = [...history].sort((a, b) => messageTime(a) - messageTime(b));
+
+              if (!chatState?.initialized) {
+                const ids = ordered.map(messageId).filter(Boolean);
+                const maxTime = ordered.reduce((mx, m) => Math.max(mx, messageTime(m)), 0);
+                cursor.chats[cid] = {
+                  initialized: true,
+                  lastTime: maxTime || Date.now(),
+                  seenIds: compactSeen(ids),
+                  group,
+                };
+                cursor.version = 2;
+                cursor.accountId = EXPECTED_USER_ID;
+                cursor.updatedAt = new Date().toISOString();
+                await saveState(stateIssue.number, cursor, persistentSession);
+
+                await gh(`/issues/${feedIssue.number}/comments`, {
+                  method: 'POST',
+                  body: {
+                    body: `@${GH_OWNER}\n\nMAX OBSERVER V2 FINAL — BASELINE PASS. Старые сообщения не отправлены как новые.`,
+                  },
+                });
+
+                console.log(`BASELINE: PASS messages=${ordered.length}`);
+                await closeBlocker();
+                console.log('PHILIPPOV MAX OBSERVER FINAL: PASS');
+                process.exit(0);
+              }
+
+              const seen = new Set(compactSeen(chatState.seenIds));
+              const lastTime = Number(chatState.lastTime || 0);
+              const nextSeen = [...seen];
+              const rows = [];
+              let maxTime = lastTime;
+
+              for (const m of ordered) {
+                const id = messageId(m) ||
+                  `t:${messageTime(m)}:${senderId(m)}:${messageText(m).slice(0, 80)}`;
+                const t = messageTime(m);
+
+                maxTime = Math.max(maxTime, t);
+                if (seen.has(id)) continue;
+                if (t && t < lastTime) continue;
+
+                nextSeen.push(id);
+                if (senderId(m) === EXPECTED_USER_ID) continue;
+
+                rows.push({
+                  group,
+                  chatId: cid,
+                  sender: senderName(m),
+                  senderId: senderId(m),
+                  messageId: id,
+                  time: iso(t),
+                  raw: messageText(m),
+                });
+              }
+
+              cursor.chats[cid] = {
+                initialized: true,
+                lastTime: maxTime,
+                seenIds: compactSeen(nextSeen),
+                group,
+              };
+              cursor.version = 2;
+              cursor.accountId = EXPECTED_USER_ID;
+              cursor.updatedAt = new Date().toISOString();
+
+              // Read the session again in case MAX rotated it during the history request.
+              persistentSession = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
+              await saveState(stateIssue.number, cursor, persistentSession);
+
+              if (rows.length) {
+                // Repository is public: never publish RAW MAX text in plaintext.
+                // Persist the whole batch encrypted with the MAX_SESSION-derived AES-256-GCM key.
+                const encryptedFeed = encryptSession(rows, BOOTSTRAP_RAW);
+                await gh(`/issues/${feedIssue.number}/comments`, {
+                  method: 'POST',
+                  body: {
+                    body: [
+                      `@${GH_OWNER}`,
+                      '',
+                      `MAX OBSERVER: ${rows.length} NEW MESSAGE(S) — ENCRYPTED`,
+                      '<!--PHILIPPOV_ENCRYPTED_FEED_V1',
+                      JSON.stringify(encryptedFeed),
+                      'PHILIPPOV_ENCRYPTED_FEED_V1-->',
+                    ].join('\n'),
+                  },
+                });
+                console.log(`OBSERVER CHECK: PASS new_messages=${rows.length}`);
+              } else {
+                console.log('OBSERVER CHECK: PASS new_messages=0');
+              }
+
+              await closeBlocker();
+              console.log('PHILIPPOV MAX OBSERVER FINAL: PASS');
+              process.exit(0);
+            } catch (error) {
+              try { await blocker(error); } catch (e) {
+                console.error(`BLOCKER NOTIFY FAILED: ${e.message}`);
+              }
+                            console.error(`MAX OBSERVER V2 FINAL FAILED: ${error?.message || error}`);
+              process.exit(1);
+            }
+          }
+
+          main().catch(error => {
+            console.error(`MAX OBSERVER V2 FINAL FATAL: ${error?.message || error}`);
+            process.exit(1);
+          });
+          JS
+
+          node --check observer.cjs
+          timeout --signal=TERM --kill-after=5s 70s node observer.cjs
