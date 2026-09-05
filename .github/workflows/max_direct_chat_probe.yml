@@ -1,0 +1,279 @@
+name: PHILIPPOV MAX SENSOR — DIRECT CHAT PROBE
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  probe:
+    name: Find direct chat by marker
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      MAX_STATE_KEY: ${{ secrets.MAX_SESSION }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Restore SENSOR and find PHILIPPOV MATCH TEST
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKDIR="$(mktemp -d)"
+          cd "$WORKDIR"
+
+          npm init -y >/dev/null 2>&1
+          npm install --silent --ignore-scripts --omit=optional --no-audit --no-fund webmaxsocket@1.2.7
+
+          cat > probe.cjs <<'JS'
+          'use strict';
+
+          const fs = require('fs');
+          const path = require('path');
+          const crypto = require('crypto');
+          const { WebMaxClient } = require('webmaxsocket');
+
+          const EXPECTED_USER_ID = '140053596';
+          const STATE_TITLE = '[STATE] PHILIPPOV MAX OBSERVER V2 FINAL';
+          const SESSION_NAME = 'philippov_max_observer_v2_final';
+          const SESSION_FILE = path.join(process.cwd(), 'sessions', `${SESSION_NAME}.json`);
+          const MARKER = 'PHILIPPOV MATCH TEST';
+
+          const GH_TOKEN = String(process.env.GH_TOKEN || '');
+          const GH_REPO = String(process.env.GH_REPO || '');
+          const STATE_KEY = String(process.env.MAX_STATE_KEY || '').trim();
+
+          if (!GH_TOKEN || !GH_REPO || !STATE_KEY) {
+            throw new Error('CONTEXT_MISSING');
+          }
+
+          const API = `https://api.github.com/repos/${GH_REPO}`;
+
+          async function gh(urlPath) {
+            const res = await fetch(`${API}${urlPath}`, {
+              headers: {
+                Authorization: `Bearer ${GH_TOKEN}`,
+                Accept: 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+                'User-Agent': 'PHILIPPOV-DIRECT-CHAT-PROBE',
+              },
+            });
+
+            const text = await res.text();
+            if (!res.ok) throw new Error(`GitHub API ${urlPath}: HTTP ${res.status}`);
+            return text ? JSON.parse(text) : null;
+          }
+
+          async function findIssueByTitle(title) {
+            for (let page = 1; page <= 5; page++) {
+              const rows = await gh(`/issues?state=all&per_page=100&page=${page}`);
+              const hit = rows.find(x => !x.pull_request && x.title === title);
+              if (hit) return hit;
+              if (rows.length < 100) break;
+            }
+            return null;
+          }
+
+          function parseEncryptedSession(body) {
+            const m = String(body || '').match(
+              /<!--PHILIPPOV_SESSION_ENC_V2_FINAL\n([\s\S]*?)\nPHILIPPOV_SESSION_ENC_V2_FINAL-->/
+            );
+            if (!m) return null;
+            try { return JSON.parse(m[1]); } catch { return null; }
+          }
+
+          function encryptionKey(secret) {
+            return crypto
+              .createHash('sha256')
+              .update(`PHILIPPOV_MAX_OBSERVER_V2_FINAL\0${secret}`)
+              .digest();
+          }
+
+          function keyId(secret) {
+            return crypto
+              .createHash('sha256')
+              .update(`PHILIPPOV_MAX_OBSERVER_V2_FINAL_ID\0${secret}`)
+              .digest('hex')
+              .slice(0, 16);
+          }
+
+          function decryptSession(envelope, secret) {
+            if (!envelope || envelope.v !== 1 || envelope.keyId !== keyId(secret)) {
+              return null;
+            }
+
+            const decipher = crypto.createDecipheriv(
+              'aes-256-gcm',
+              encryptionKey(secret),
+              Buffer.from(envelope.iv, 'base64'),
+            );
+
+            decipher.setAuthTag(Buffer.from(envelope.tag, 'base64'));
+
+            const plain = Buffer.concat([
+              decipher.update(Buffer.from(envelope.data, 'base64')),
+              decipher.final(),
+            ]).toString('utf8');
+
+            return JSON.parse(plain);
+          }
+
+          function textFromValue(value, depth = 0) {
+            if (typeof value === 'string') return value;
+            if (!value || typeof value !== 'object' || depth > 4) return '';
+
+            for (const key of ['text', 'message', 'caption', 'body', 'content']) {
+              const nested = value[key];
+
+              if (typeof nested === 'string' && nested.trim()) return nested;
+
+              if (nested && typeof nested === 'object') {
+                const found = textFromValue(nested, depth + 1);
+                if (found) return found;
+              }
+            }
+
+            return '';
+          }
+
+          function messageText(m) {
+            return (
+              textFromValue(m?.text) ||
+              textFromValue(m?.rawData?.text) ||
+              textFromValue(m?.rawData?.message) ||
+              textFromValue(m?.rawData)
+            );
+          }
+
+          function getChatId(c) {
+            return String(c?.id ?? c?.chatId ?? c?.chat_id ?? '').trim();
+          }
+
+          async function main() {
+            const stateIssue = await findIssueByTitle(STATE_TITLE);
+            if (!stateIssue) throw new Error('STATE_ISSUE_NOT_FOUND');
+
+            const restoredSession = decryptSession(
+              parseEncryptedSession(stateIssue.body),
+              STATE_KEY,
+            );
+
+            if (!restoredSession?.token || !restoredSession?.deviceId) {
+              throw new Error('STATE_SESSION_RESTORE_FAILED');
+            }
+
+            fs.mkdirSync(path.dirname(SESSION_FILE), { recursive: true });
+            fs.writeFileSync(
+              SESSION_FILE,
+              JSON.stringify(restoredSession, null, 2),
+              'utf8',
+            );
+
+            const client = new WebMaxClient({
+              name: SESSION_NAME,
+              token: String(restoredSession.token),
+              deviceType: 'WEB',
+              saveToken: true,
+              clearSessionOnFailedSync: false,
+              sessionBackup: false,
+              debug: false,
+              logIncoming: false,
+              maxReconnectAttempts: 1,
+              reconnectDelay: 1000,
+              timezone: 'Europe/Moscow',
+            });
+
+            await client.start();
+
+            const actualId = String(
+              client?.me?.id ?? client?.session?.get?.('userId') ?? 'UNKNOWN',
+            );
+
+            if (actualId !== EXPECTED_USER_ID) {
+              throw new Error(
+                `WRONG_SENSOR_ACCOUNT expected=${EXPECTED_USER_ID} got=${actualId}`,
+              );
+            }
+
+            console.log(`DIRECT CHAT SENSOR LOGIN: PASS user_id=${actualId}`);
+
+            let got = [];
+            try {
+              got = await client.getChats(0);
+            } catch {}
+
+            let chats =
+              Array.isArray(got) ? got :
+              Array.isArray(got?.chats) ? got.chats :
+              Array.isArray(got?.payload?.chats) ? got.payload.chats :
+              [];
+
+            if (!chats.length && Array.isArray(client?.lastSyncPayload?.chats)) {
+              chats = client.lastSyncPayload.chats;
+            }
+
+            const chatIds = [];
+            const seen = new Set();
+
+            for (const chat of chats) {
+              const cid = getChatId(chat);
+              if (!cid || seen.has(cid)) continue;
+              seen.add(cid);
+              chatIds.push(cid);
+            }
+
+            console.log(`DIRECT CHAT CANDIDATES: ${chatIds.length}`);
+
+            const hits = [];
+
+            for (const cid of chatIds.slice(0, 200)) {
+              try {
+                const history = await client.getHistory(
+                  Number(cid),
+                  Date.now(),
+                  25,
+                  0,
+                );
+
+                if (
+                  Array.isArray(history) &&
+                  history.some(m => messageText(m).trim() === MARKER)
+                ) {
+                  hits.push({
+                    chatId: cid,
+                    historyTotal: history.length,
+                  });
+                }
+              } catch {}
+            }
+
+            if (hits.length !== 1) {
+              console.log(`DIRECT CHAT PROBE: NOT_PASS hits=${hits.length}`);
+              throw new Error(`DIRECT_CHAT_MARKER_HITS_${hits.length}`);
+            }
+
+            console.log(
+              `DIRECT CHAT PROBE: PASS chat_id=${hits[0].chatId} historyTotal=${hits[0].historyTotal}`,
+            );
+            console.log('DIRECT CHAT PROBE: COMPLETE');
+          }
+
+          main().catch(err => {
+            console.error(
+              `DIRECT CHAT PROBE: FAIL ${String(err?.message || err).slice(0, 500)}`,
+            );
+            process.exit(1);
+          });
+          JS
+
+          node --check probe.cjs
+          timeout --signal=TERM --kill-after=5s 260s node probe.cjs
