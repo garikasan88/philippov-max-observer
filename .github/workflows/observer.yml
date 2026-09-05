@@ -50,7 +50,7 @@ jobs:
           const { WebMaxClient } = require('webmaxsocket');
 
           // ------------------------------------------------------------
-          // PHILIPPOV MAX OBSERVER V2 FINAL + REQUEST PARSER DRY v1.2 — MVP TRAINING
+          // PHILIPPOV MAX OBSERVER V2 FINAL + REQUEST PARSER DRY v1.3 — MVP SCOPE FILTER
           // Read-only. No send/reply/edit/delete methods are called.
           // One target account + one confirmed test chat.
           // ------------------------------------------------------------
@@ -751,6 +751,71 @@ jobs:
           }
           
           
+
+          // ============================================================
+          // MVP PRODUCTION SCOPE FILTER v1.0 — 05.09.2026
+          // KEEP: apartment requests + ready/resale house requests.
+          // IGNORE: developer/newbuild houses, land-only, commercial,
+          // broad investment fishing, promo/info/advertising posts.
+          // Core 61-case parser remains intact; this is a production gate on top.
+          // ============================================================
+          function applyMvpScope(core, text) {
+            const raw = String(text ?? "").trim();
+            const norm = normalizeText(raw);
+
+            const promoInfo =
+              /(?:удобн[а-яёa-z]*\s+сайт\s+для\s+поиска\s+недвиж|актуальн[а-яёa-z]*\s+прайс|ежедневн[а-яёa-z]*\s+рассылк|реклам[а-яёa-z]*\s+в\s+групп|наш\s+max\s+канал|подписывай[а-яёa-z]*\s+на\s+сообществ|сайт\s+с\s+объектами|прайс\s+квартир)/iu.test(raw) ||
+              (/(?:https?:\/\/|www\.)/iu.test(raw) && /(?:прайс|канал|рассылк|реклам|сайт|подписывай)/iu.test(raw));
+            if (promoInfo) return {kind:"IGNORE", reason:"PROMO_INFO", coreKind:core?.kind || "UNKNOWN"};
+
+            const broadInvestor =
+              /(?:выгодн[а-яёa-z]*\s+влож|инвестир[а-яёa-z]*|инвестиц[а-яёa-z]*)/iu.test(raw) &&
+              /(?:участок|земл|коммерц|дом|квартир)/iu.test(raw) &&
+              /(?:ликвидн|ниже\s+рынк|срочн[а-яёa-z]*\s+продаж|интересн[а-яёa-z]*\s+объект|присылайте\s+(?:ваши\s+)?(?:экс|вариант|объект))/iu.test(raw);
+            if (broadInvestor) return {kind:"IGNORE", reason:"BROAD_INVESTOR_REQUEST", coreKind:core?.kind || "UNKNOWN"};
+
+            if (!core || core.kind !== "REQUEST") return core;
+
+            const types = Array.isArray(core.types) ? core.types : [];
+            if (types.includes("commercial") || /(?:коммерц|общепит|нежил)/iu.test(norm)) {
+              return {kind:"IGNORE", reason:"OUT_OF_SCOPE_COMMERCIAL", coreKind:core.kind};
+            }
+
+            const landOnly = /(?:участок|земл[а-яёa-z]*)/iu.test(raw) &&
+              !/(?:квартир|студ|одноком|двуш|тр[её]ш|евро\s*[- ]?2|(?:^|\s)\d\s*[- ]?(?:к|ком)|дом|коттедж|таунхаус)/iu.test(raw);
+            if (landOnly) return {kind:"IGNORE", reason:"OUT_OF_SCOPE_LAND", coreKind:core.kind};
+
+            const apartmentTypes=["studio","1k","euro2","2k","3k"];
+            const hasApartment=types.some(t=>apartmentTypes.includes(t));
+            const hasReadyHouse=types.includes("house");
+            if (!hasApartment && !hasReadyHouse) return {kind:"IGNORE", reason:"OUT_OF_SCOPE_OTHER", coreKind:core.kind};
+            return core;
+          }
+
+          function parseObservedMessage(text) {
+            return applyMvpScope(parseRequest(text), text);
+          }
+
+          function mvpScopeSelfTest() {
+            const fail=(name,detail='')=>{throw new Error(`MVP SCOPE SELFTEST ${name}${detail?': '+detail:''}`)};
+            let x;
+            x=parseObservedMessage("ИНФОРМАЦИЯ. Удобный сайт для поиска недвижимости. ПРАЙС. Подписывайся на сообщество, ежедневная рассылка, реклама в группах.");
+            if(x.kind!=="IGNORE"||x.reason!=="PROMO_INFO") fail("promo-info",JSON.stringify(x));
+            x=parseObservedMessage("ЗАПРОС: выгодно вложить в недвижимость 5-6 млн с моими %. Участок, дом, квартира, коммерция. Нужны ликвидные интересные объекты на срочной продаже. Присылайте ваши эксы.");
+            if(x.kind!=="IGNORE"||x.reason!=="BROAD_INVESTOR_REQUEST") fail("broad-investor",JSON.stringify(x));
+            x=parseObservedMessage("Кто занимается коммерцией? Нужна улица Красная, под общепит. Завтра смотрим.");
+            if(x.kind!=="IGNORE"||x.reason!=="OUT_OF_SCOPE_COMMERCIAL") fail("commercial",JSON.stringify(x));
+            x=parseObservedMessage("Нужен участок 6 соток, район Северный, до 4 млн.");
+            if(x.kind!=="IGNORE") fail("land-only",JSON.stringify(x));
+            x=parseObservedMessage("Нужен дом от застройщика. Карасунский округ. Семейная ипотека.");
+            if(x.kind!=="IGNORE"||x.reason!=="DEVELOPER_HOUSE_REQUEST") fail("developer-house",JSON.stringify(x));
+            x=parseObservedMessage("Нужен готовый дом. Карасунский округ. До 9 млн. Семейная ипотека.");
+            if(x.kind!=="REQUEST"||!x.types.includes("house")) fail("ready-house",JSON.stringify(x));
+            x=parseObservedMessage("Запрос. 2к квартира, ФМР, до 8 млн, наличные.");
+            if(x.kind!=="REQUEST"||!x.types.includes("2k")) fail("apartment",JSON.stringify(x));
+            return "MVP_SCOPE_FILTER_PASS";
+          }
+
           function parserSelfTest() {
             const fail = (name, detail='') => { throw new Error(`REQUEST PARSER SELFTEST ${name}${detail ? ': '+detail : ''}`); };
           
@@ -840,6 +905,8 @@ jobs:
             try {
               const parserStatus = parserSelfTest();
               console.log(`REQUEST PARSER SELFTEST: ${parserStatus}`);
+              const scopeStatus = mvpScopeSelfTest();
+              console.log(`MVP SCOPE SELFTEST: ${scopeStatus}`);
 
               // GitHub preflight BEFORE MAX login, so a rotated token is never lost
               // because of a missing GitHub permission.
@@ -1002,7 +1069,7 @@ jobs:
                   messageId: id,
                   time: iso(t),
                   raw: messageText(m),
-                  parsed: parseRequest(messageText(m)),
+                  parsed: parseObservedMessage(messageText(m)),
                 });
               }
 
