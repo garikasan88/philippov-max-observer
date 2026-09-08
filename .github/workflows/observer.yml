@@ -2,6 +2,8 @@ name: PHILIPPOV MAX OBSERVER — DISPATCH BRIDGE
 
 on:
   workflow_dispatch: {}
+  issues:
+    types: [opened]
 
 permissions:
   contents: read
@@ -14,6 +16,8 @@ concurrency:
 jobs:
   dispatch:
     name: Dispatch production sensor
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' || github.event.issue.title == '[CONTROL] PHILIPPOV DISPATCH PRODUCTION SENSOR' }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
 
