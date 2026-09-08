@@ -83,7 +83,8 @@ jobs:
                   break
 
           script = "\n".join(lines).rstrip() + "\n"
-          old = 'if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then'
+          event_expr = "$" + "{{ github.event_name }}"
+          old = f'if [[ "{event_expr}" == "workflow_dispatch" ]]; then'
           new = 'if [[ "${PHILIPPOV_SMOKE_REQUEST:-false}" == "true" ]]; then'
           if old not in script:
               raise SystemExit("FROZEN_PRODUCTION_SMOKE_MARKER_NOT_FOUND")
