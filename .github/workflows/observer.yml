@@ -2,8 +2,6 @@ name: PHILIPPOV MAX OBSERVER — DISPATCH BRIDGE
 
 on:
   workflow_dispatch: {}
-  schedule:
-    - cron: "*/10 * * * *"
 
 permissions:
   contents: read
