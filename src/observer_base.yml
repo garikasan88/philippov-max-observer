@@ -1,0 +1,1732 @@
+name: PHILIPPOV MAX OBSERVER — WORKING ONE-SHOT
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: philippov-max-observer-v2-final
+  cancel-in-progress: true
+
+jobs:
+  observe:
+    name: Observer read-only
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    env:
+      MAX_BOOTSTRAP_SECRET: ${{ secrets.MAX_SESSION }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      GH_OWNER: ${{ github.repository_owner }}
+      GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: MAX Observer V2 FINAL
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          WORKDIR="$(mktemp -d)"
+          cd "$WORKDIR"
+
+          npm init -y >/dev/null 2>&1
+          npm install --silent --ignore-scripts --omit=optional --no-audit --no-fund webmaxsocket@1.2.7
+
+          cat > observer.cjs <<'JS'
+          'use strict';
+
+          const fs = require('fs');
+          const path = require('path');
+          const crypto = require('crypto');
+          const { WebMaxClient } = require('webmaxsocket');
+
+          // ------------------------------------------------------------
+          // PHILIPPOV MAX OBSERVER V2 FINAL + LIVE OBJECT MATCH DRY v1.4.4
+          // Read-only. No send/reply/edit/delete methods are called.
+          // One target account + one confirmed test chat.
+          // ------------------------------------------------------------
+
+          const EXPECTED_USER_ID = '402668979';
+          const TARGET_CHAT_ID = '-78471339098233';
+          const TARGET_CHAT_NAME_FALLBACK = 'СКАУТ ТЕСТ';
+          const OBJECT_CHAT_TITLE = 'Мои объекты';
+          const REQUEST_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+          const STATE_TITLE = '[STATE] PHILIPPOV MAX OBSERVER V2 FINAL';
+          const FEED_TITLE = 'PHILIPPOV MAX OBSERVER — REQUEST FEED';
+          const BLOCKER_TITLE = 'PHILIPPOV MAX OBSERVER — BLOCKER';
+          const MATCH_FEED_TITLE = 'PHILIPPOV MAX OBSERVER — MATCH DRY FEED';
+          const SESSION_NAME = 'philippov_max_observer_v2_final';
+          const SESSION_FILE = path.join(process.cwd(), 'sessions', `${SESSION_NAME}.json`);
+
+          const GH_TOKEN = String(process.env.GH_TOKEN || '');
+          const GH_REPO = String(process.env.GH_REPO || '');
+          const GH_OWNER = String(process.env.GH_OWNER || 'garikasan88');
+          const GH_RUN_URL = String(process.env.GH_RUN_URL || '');
+          const BOOTSTRAP_RAW = String(process.env.MAX_BOOTSTRAP_SECRET || '').trim();
+
+          const HISTORY_BACKWARD = 500;
+          const MAX_SEEN_IDS = 3000;
+
+          if (!GH_TOKEN || !GH_REPO) throw new Error('GITHUB_CONTEXT_MISSING');
+          if (!BOOTSTRAP_RAW) throw new Error('MAX_SESSION_EMPTY');
+
+          function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+          }
+
+          function bootstrapToken(raw) {
+            const s = String(raw || '').trim();
+            if (!s) return '';
+            try {
+              const x = JSON.parse(s);
+              if (typeof x === 'string') return x.trim();
+              for (const k of ['token', 'access_token', 'accessToken', 'auth_token', 'authToken']) {
+                if (typeof x?.[k] === 'string' && x[k].trim()) return x[k].trim();
+              }
+            } catch {}
+            return s;
+          }
+
+          const BOOTSTRAP_TOKEN = bootstrapToken(BOOTSTRAP_RAW);
+          if (!BOOTSTRAP_TOKEN) throw new Error('MAX_SESSION_TOKEN_EMPTY');
+
+          const API = `https://api.github.com/repos/${GH_REPO}`;
+
+          async function gh(urlPath, { method = 'GET', body = null } = {}) {
+            let last = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                const res = await fetch(`${API}${urlPath}`, {
+                  method,
+                  headers: {
+                    Authorization: `Bearer ${GH_TOKEN}`,
+                    Accept: 'application/vnd.github+json',
+                    'X-GitHub-Api-Version': '2022-11-28',
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'PHILIPPOV-MAX-OBSERVER-V2-FINAL',
+                  },
+                  body: body == null ? undefined : JSON.stringify(body),
+                });
+                const text = await res.text();
+                let data = null;
+                try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+                if (!res.ok) throw new Error(`GitHub API ${method} ${urlPath}: HTTP ${res.status}`);
+                return data;
+              } catch (e) {
+                last = e;
+                if (attempt < 3) await sleep(attempt * 750);
+              }
+            }
+            throw last;
+          }
+
+          async function findIssueByTitle(title) {
+            for (let page = 1; page <= 5; page++) {
+              const rows = await gh(`/issues?state=all&per_page=100&page=${page}`);
+              const hit = rows.find(x => !x.pull_request && x.title === title);
+              if (hit) return hit;
+              if (rows.length < 100) break;
+            }
+            return null;
+          }
+
+          function parseCursor(body) {
+            const m = String(body || '').match(/<!--PHILIPPOV_CURSOR_V2_FINAL\n([\s\S]*?)\nPHILIPPOV_CURSOR_V2_FINAL-->/);
+            if (!m) return { version: 2, chats: {} };
+            try {
+              const x = JSON.parse(m[1]);
+              if (!x || typeof x !== 'object') return { version: 2, chats: {} };
+              if (!x.chats || typeof x.chats !== 'object') x.chats = {};
+              return x;
+            } catch {
+              return { version: 2, chats: {} };
+            }
+          }
+
+          function parseEncryptedSession(body) {
+            const m = String(body || '').match(/<!--PHILIPPOV_SESSION_ENC_V2_FINAL\n([\s\S]*?)\nPHILIPPOV_SESSION_ENC_V2_FINAL-->/);
+            if (!m) return null;
+            try { return JSON.parse(m[1]); } catch { return null; }
+          }
+
+          function encryptionKey(secret) {
+            return crypto
+              .createHash('sha256')
+              .update(`PHILIPPOV_MAX_OBSERVER_V2_FINAL\0${secret}`)
+              .digest();
+          }
+
+          function keyId(secret) {
+            return crypto
+              .createHash('sha256')
+              .update(`PHILIPPOV_MAX_OBSERVER_V2_FINAL_ID\0${secret}`)
+              .digest('hex')
+              .slice(0, 16);
+          }
+
+          function encryptSession(session, secret) {
+            const iv = crypto.randomBytes(12);
+            const cipher = crypto.createCipheriv('aes-256-gcm', encryptionKey(secret), iv);
+            const cipherText = Buffer.concat([
+              cipher.update(Buffer.from(JSON.stringify(session), 'utf8')),
+              cipher.final(),
+            ]);
+            return {
+              v: 1,
+              keyId: keyId(secret),
+              iv: iv.toString('base64'),
+              tag: cipher.getAuthTag().toString('base64'),
+              data: cipherText.toString('base64'),
+            };
+          }
+
+          function decryptSession(envelope, secret) {
+            if (!envelope || envelope.v !== 1 || envelope.keyId !== keyId(secret)) return null;
+            try {
+              const decipher = crypto.createDecipheriv(
+                'aes-256-gcm',
+                encryptionKey(secret),
+                Buffer.from(envelope.iv, 'base64'),
+              );
+              decipher.setAuthTag(Buffer.from(envelope.tag, 'base64'));
+              const plain = Buffer.concat([
+                decipher.update(Buffer.from(envelope.data, 'base64')),
+                decipher.final(),
+              ]).toString('utf8');
+              return JSON.parse(plain);
+            } catch {
+              return null;
+            }
+          }
+
+          function stateBody(cursor, encryptedSession) {
+            return [
+              'PHILIPPOV MAX OBSERVER V2 FINAL — service state.',
+              'MAX session below is AES-256-GCM encrypted.',
+              '',
+              '<!--PHILIPPOV_CURSOR_V2_FINAL',
+              JSON.stringify(cursor),
+              'PHILIPPOV_CURSOR_V2_FINAL-->',
+              '',
+              '<!--PHILIPPOV_SESSION_ENC_V2_FINAL',
+              encryptedSession ? JSON.stringify(encryptedSession) : 'null',
+              'PHILIPPOV_SESSION_ENC_V2_FINAL-->',
+            ].join('\n');
+          }
+
+          function messageId(m) {
+            return String(m?.id ?? m?.rawData?.id ?? m?.messageId ?? '').trim();
+          }
+
+          function messageTime(m) {
+            const n = Number(m?.timestamp ?? m?.rawData?.time ?? m?.time ?? 0);
+            return Number.isFinite(n) && n > 0 ? n : 0;
+          }
+
+          function textFromValue(value, depth = 0) {
+            if (typeof value === 'string') return value;
+            if (!value || typeof value !== 'object' || depth > 4) return '';
+
+            for (const key of ['text', 'message', 'caption', 'body', 'content']) {
+              const nested = value[key];
+
+              if (typeof nested === 'string' && nested.trim()) {
+                return nested;
+              }
+
+              if (nested && typeof nested === 'object') {
+                const found = textFromValue(nested, depth + 1);
+                if (found) return found;
+              }
+            }
+
+            return '';
+          }
+
+          function messageText(m) {
+            return (
+              textFromValue(m?.text) ||
+              textFromValue(m?.rawData?.text) ||
+              textFromValue(m?.rawData?.message) ||
+              textFromValue(m?.rawData)
+            );
+          }
+
+          function senderId(m) {
+            const raw = m?.rawData?.sender;
+            const value =
+              m?.senderId ??
+              (raw && typeof raw === 'object' ? raw.id : raw) ??
+              m?.rawData?.senderId ??
+              m?.rawData?.sender_id ??
+              'UNKNOWN';
+            return String(value);
+          }
+
+          function senderName(m) {
+            try {
+              if (typeof m?.getSenderName === 'function') {
+                const n = String(m.getSenderName() || '').trim();
+                if (n && n !== 'Unknown') return n;
+              }
+            } catch {}
+            const raw = m?.rawData?.sender;
+            if (raw && typeof raw === 'object') {
+              const n = raw.fullname || raw.full_name || raw.name ||
+                [raw.first_name, raw.last_name].filter(Boolean).join(' ');
+              if (n) return String(n);
+            }
+            return 'UNKNOWN';
+          }
+
+          function compactSeen(ids) {
+            return [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))]
+              .slice(-MAX_SEEN_IDS);
+          }
+
+          function iso(t) {
+            const n = Number(t || 0);
+            if (!n) return 'UNKNOWN';
+            try {
+              return new Date(n < 10_000_000_000 ? n * 1000 : n).toISOString();
+            } catch {
+              return 'UNKNOWN';
+            }
+          }
+
+          async function ensureIssue(title, body) {
+            let issue = await findIssueByTitle(title);
+            if (!issue) {
+              issue = await gh('/issues', { method: 'POST', body: { title, body } });
+            }
+            return issue;
+          }
+
+          async function saveState(issueNumber, cursor, session) {
+            const encrypted = session ? encryptSession(session, BOOTSTRAP_RAW) : null;
+            await gh(`/issues/${issueNumber}`, {
+              method: 'PATCH',
+              body: { body: stateBody(cursor, encrypted), state: 'closed' },
+            });
+          }
+
+          async function blocker(error) {
+            const text = String(error?.message || error || 'UNKNOWN').slice(0, 1200);
+            const body = [
+              `@${GH_OWNER}`,
+              '',
+              'PHILIPPOV MAX OBSERVER V2 FINAL — BLOCKER',
+              `Ошибка: ${text}`,
+              `Запуск: ${GH_RUN_URL}`,
+              '',
+              'Fisherman / рассылка не изменялись.',
+            ].join('\n');
+            let issue = await findIssueByTitle(BLOCKER_TITLE);
+            if (!issue) {
+              issue = await gh('/issues', { method: 'POST', body: { title: BLOCKER_TITLE, body } });
+            } else {
+              await gh(`/issues/${issue.number}`, { method: 'PATCH', body: { body, state: 'open' } });
+            }
+          }
+
+          async function closeBlocker() {
+            const issue = await findIssueByTitle(BLOCKER_TITLE);
+            if (issue?.state === 'open') {
+              await gh(`/issues/${issue.number}`, { method: 'PATCH', body: { state: 'closed' } });
+            }
+          }
+
+          // ============================================================
+          // REQUEST PARSER v1.0 — port of CLOSED 61-case REQUEST/MATCH ruleset
+          // DRY ONLY: parse/classify; does not send anything to MAX.
+          // ============================================================
+          // PHILIPPOV SCOUT REQUEST PARSER v1.0
+          // Ported without semantic redesign from CURRENT_REQUEST_MATCH_DRY_V06 (01.09.2026).
+          // Training basis: 61 manually reviewed REQUEST→MATCH cases. UNKNOWN stays UNKNOWN.
+          
+          function normalizeText(text) {
+            return String(text ?? "")
+              .toLowerCase()
+              .replaceAll("ё", "е")
+              .replaceAll("²", "2")
+              .replace(/[^0-9a-zа-я]+/giu, " ")
+              .replace(/\s+/g, " ")
+              .trim();
+          }
+          
+          function containsAny(norm, needles) {
+            return needles.some(x => norm.includes(normalizeText(x)));
+          }
+          
+          function firstNumber(s) {
+            const m = String(s ?? "").match(/\d+(?:[.,]\d+)?/u);
+            return m ? Number(m[0].replace(",", ".")) : null;
+          }
+          
+          function moneyTokenToRub(rawNum, rawUnit = "") {
+            const src = String(rawNum).trim();
+            const grouped = /^\d{1,3}(?:[ \u00A0\u202F]\d{3}){1,2}$/.test(src);
+            const compact = grouped ? src.replace(/[^\d]/g, "") : src.replace(",", ".");
+            const n = Number(compact);
+            if (!Number.isFinite(n) || n <= 0) return null;
+            const u = normalizeText(rawUnit);
+            if (/млн|милл|миллион/u.test(u)) return Math.round(n * 1_000_000);
+            if (/тыс|тр/u.test(u)) return Math.round(n * 1_000);
+            if (/руб/u.test(u)) return Math.round(n);
+            if (grouped && n >= 100000) return Math.round(n);
+            if (grouped && n >= 1000 && n < 100000) return Math.round(n * 1_000);
+            if (n >= 1000 && n <= 100000) return Math.round(n * 1_000);
+            if (n >= 1 && n < 100) return Math.round(n * 1_000_000);
+            if (n >= 100000 && n <= 100000000) return Math.round(n);
+            return null;
+          }
+          
+          function parseBudgetMax(text) {
+            const raw = String(text ?? "").replace(/(\d)\.(\d{3})(?!\d)/g, "$1 $2");
+            const candidates = [];
+            const add = (num, unit, why) => {
+              const v = moneyTokenToRub(num, unit);
+              if (v !== null && v >= 500_000 && v <= 100_000_000) candidates.push({value:v, why});
+            };
+            const N = "(\\d{1,3}(?:[ \\u00A0\\u202F]\\d{3}){1,2}|\\d+(?:[.,]\\d+)?)";
+            const U = "(млн|миллион(?:а|ов)?|тыс(?:яч)?|тр\\.?|т\\.?\\s*р\\.?|руб(?:лей|ля|\\.)?)?";
+          
+            // Explicit budget wording may legally carry a plain 4-digit "thousands" value.
+            for (const m of raw.matchAll(new RegExp(`бюджет(?:\\s*(?:до|макс(?:имум)?))?[^\\d\\n]{0,18}${N}\\s*${U}`, "giu"))) add(m[1], m[2] || "", "budget-explicit");
+            for (const m of raw.matchAll(new RegExp(`(?:до|макс(?:имум)?)[^\\d\\n]{0,8}${N}\\s*(млн|миллион(?:а|ов)?|тыс(?:яч)?|тр\\.?|т\\.?\\s*р\\.?|руб(?:лей|ля|\\.)?)`, "giu"))) add(m[1], m[2], "money-unit");
+            // "до 6500" / "до 5 700" without unit is common realtor shorthand; require thousands-like shape so "до 20 лет" is never money.
+            for (const m of raw.matchAll(/(?:до|макс(?:имум)?)[^\d\n]{0,8}(\d{4,5}|\d{1,2}[ \u00A0\u202F]\d{3})(?!\s*(?:лет|этаж|м2|м²|кв))/giu)) add(m[1], "", "shorthand-thousands");
+            for (const m of raw.matchAll(/(\d{3,5})\s*(?:тыс(?:яч)?|тр\.?)?\s*(?:нал|налич)/giu)) add(m[1], "тыс", "cash-adjacent");
+            for (const m of raw.matchAll(/(?:нал|налич(?:ка|ные|ными)?)[^\d\n]{0,8}(\d{3,5}|\d{1,2}[ \u00A0\u202F]\d{3})(?!\s*(?:лет|этаж|м2|м²|кв))/giu)) add(m[1], "", "cash-following");
+            for (const m of raw.matchAll(/(\d{3,5})\s*[-–—]\s*(\d{3,5})(?:\s*(?:тыс|тр))?/giu)) add(m[2], "тыс", "range-thousands");
+            for (const m of raw.matchAll(/(\d+(?:[.,]\d+)?)\s*[-–—]\s*(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?)/giu)) add(m[2], m[3], "range-millions");
+            // Common realtor shorthand without the word "budget": "6,2 млн" or object mention "за 3500".
+            for (const m of raw.matchAll(/(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?)/giu)) add(m[1], m[2], "generic-millions");
+            for (const m of raw.matchAll(/\bза\s+(\d{4,5})(?!\s*(?:лет|этаж|м2|м²|кв))/giu)) add(m[1], "", "price-after-za");
+          
+            if (!candidates.length) return null;
+            return candidates.sort((a,b) => b.value - a.value)[0].value;
+          }
+          
+          function parseConditionalFinanceBudgets(text) {
+            const raw = String(text ?? "").replace(/(\d)\.(\d{3})(?!\d)/g, "$1,$2");
+            const get = (re) => {
+              const m = raw.match(re);
+              return m ? moneyTokenToRub(m[1], m[2] || "") : null;
+            };
+            const familyMortgageMax = get(/если\s+семейн(?:ая|ой)?\s+ипотек[^\d\n]{0,25}(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)?/iu);
+            const cashMax = get(/если\s+налич(?:ные|ка|ными)?[^\d\n]{0,25}(?:до\s*)?(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)?/iu);
+            return {familyMortgageMax, cashMax};
+          }
+          
+          function parseTypeSpecificBudgets(text) {
+            const raw = String(text ?? "").replace(/(\d)\.(\d{3})(?!\d)/g, "$1,$2");
+            const out = {studio:null, "1k":null, euro2:null, "2k":null, "3k":null, house:null};
+            const take = (reRange, reOne, key) => {
+              const mr = raw.match(reRange);
+              if (mr) { out[key] = moneyTokenToRub(mr[2], mr[3] || ""); return; }
+              const mo = raw.match(reOne);
+              if (mo) out[key] = moneyTokenToRub(mo[1], mo[2] || "");
+            };
+            take(/(?:однушк[а-я]*|1\s*[- ]?(?:к|ком)[а-я]*)[^\n\d]{0,24}(\d+(?:[.,]\d+)?)\s*[-–—]\s*(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu,
+                 /(?:однушк[а-я]*|1\s*[- ]?(?:к|ком)[а-я]*)[^\n\d]{0,24}(?:до\s*)?(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu, "1k");
+            take(/(?:двушк[а-я]*|2\s*[- ]?(?:к|ком)[а-я]*)[^\n\d]{0,24}(\d+(?:[.,]\d+)?)\s*[-–—]\s*(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu,
+                 /(?:двушк[а-я]*|2\s*[- ]?(?:к|ком)[а-я]*)[^\n\d]{0,24}(?:до\s*)?(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu, "2k");
+            take(/(?:тр[её]шк[а-я]*|3\s*[- ]?(?:к|ком)[а-я]*)[^\n\d]{0,24}(\d+(?:[.,]\d+)?)\s*[-–—]\s*(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu,
+                 /(?:тр[её]шк[а-я]*|3\s*[- ]?(?:к|ком)[а-я]*)[^\n\d]{0,24}(?:до\s*)?(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu, "3k");
+            take(/студи[а-я]*[^\n\d]{0,24}(\d+(?:[.,]\d+)?)\s*[-–—]\s*(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu,
+                 /студи[а-я]*[^\n\d]{0,24}(?:до\s*)?(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|тыс|тр)/iu, "studio");
+            return out;
+          }
+          
+          function parseCommissionInside(text) {
+            const raw = String(text ?? "").replace(/(\d)\.(\d{3})(?!\d)/g, "$1 $2");
+            const norm = normalizeText(raw);
+            const inside = /(?:мои|моими|наши|нашими|комисс)[^\n]{0,30}(?:внутри|в цене)|(?:внутри)[^\n]{0,30}(?:мои|наши|комисс)/iu.test(raw) || /с\s+(?:моими|нашими)/iu.test(raw);
+            const above = /(?:мои|наши|комисс)[^\n]{0,30}(?:сверху)|(?:сверху)[^\n]{0,30}(?:мои|наши|комисс)/iu.test(raw);
+            const parseCommissionNum = (num, unit="") => {
+              let v = moneyTokenToRub(num, unit);
+              if (v === null) {
+                const n = Number(String(num).replace(/[^\d.,]/g, "").replace(",", "."));
+                if (Number.isFinite(n) && n >= 20 && n <= 999) v = Math.round(n * 1000);
+              }
+              return v;
+            };
+            let amount = null;
+            // For "150-200" reserve the upper end so the buyer budget is never overstated.
+            const range = raw.match(/(?:мои|моими|наши|нашими|комисс(?:ия|ии|ию)?)[^\d\n]{0,15}(\d{2,4})\s*[-–—]\s*(\d{2,4})/iu) || raw.match(/(\d{2,4})\s*[-–—]\s*(\d{2,4})[^\n]{0,15}(?:мои|наши|комисс)/iu);
+            if (range) amount = parseCommissionNum(range[2], "");
+            if (amount === null) {
+              for (const m of raw.matchAll(/(?:мои|моими|наши|нашими|комисс(?:ия|ии|ию)?)[^\d\n]{0,20}(\d{1,3}(?:[ \u00A0\u202F]\d{3})?|\d+(?:[.,]\d+)?)\s*(тыс|тр|млн)?/giu)) {
+                const v = parseCommissionNum(m[1], m[2] || "");
+                if (v !== null && v >= 20_000 && v <= 2_000_000) { amount = v; break; }
+              }
+            }
+            if (amount === null) {
+              for (const m of raw.matchAll(/(\d{1,3}(?:[ \u00A0\u202F]\d{3})?|\d+(?:[.,]\d+)?)\s*(тыс|тр)?[^\n]{0,12}(?:мои|наши|комисс)/giu)) {
+                const v = parseCommissionNum(m[1], m[2] || "");
+                if (v !== null && v >= 20_000 && v <= 2_000_000) { amount = v; break; }
+              }
+            }
+            const percent = (() => {
+              const m = raw.match(/(?:мои|моими|наши|нашими|комисс(?:ия|ии|ию)?)[^\d%\n]{0,15}(\d+(?:[.,]\d+)?)\s*%/iu) || raw.match(/(\d+(?:[.,]\d+)?)\s*%[^\n]{0,12}(?:мои|наши|комисс)/iu);
+              return m ? Number(m[1].replace(",", ".")) : null;
+            })();
+            const clientPays = /клиент\s+платит|покупатель\s+(?:сам\s+)?(?:платит|оплачивает)/iu.test(raw);
+            return {inside, above, amount, percent, clientPays, hidden: clientPays && amount === null && percent === null, rawHint: norm.includes("с нашими") || norm.includes("с моими")};
+          }
+          
+          
+          const REQUEST_JK_ALIASES = Object.freeze({
+            "смородина": ["смородина"],
+            "перспектива": ["перспектива"],
+            "альфа": ["альфа", "кино"],
+            "кино": ["альфа", "кино"],
+            "панорама": ["панорама"],
+            "дом у озера": ["дом у озера", "дом озера"],
+            "симфония": ["симфония"],
+            "адмирал": ["адмирал"],
+            "любимово": ["любимово"],
+            "образцово": ["образцово"],
+            "парусная регата": ["парусная регата"],
+            "премьера": ["премьера"],
+            "парк победы": ["парк победы"],
+            "мозаика": ["мозаика"],
+            "ракурс": ["ракурс"],
+            "югге": ["югге"],
+            "сегодня": ["жк сегодня"],
+            "новелла": ["новелла"],
+            "облака": ["облака"],
+            "сармат": ["сармат"],
+            "друзья": ["жк друзья", "друзья"],
+            "спорт вилладж": ["спорт вилладж", "sport village"],
+            "спортивная деревня": ["спортивная деревня"],
+            "южане": ["южане"],
+            "восточно-кругликовская-черкасская": ["восточно кругликовская черкасская", "таурус", "таурас"],
+          });
+          
+          function detectKnownJks(text) {
+            const norm = normalizeText(text);
+            const out = [];
+            for (const [canon, aliases] of Object.entries(REQUEST_JK_ALIASES)) {
+              if (aliases.some(a => norm.includes(normalizeText(a)))) out.push(canon);
+            }
+            return [...new Set(out)];
+          }
+          
+          const GEO_ALIASES = Object.freeze({
+            "весь краснодар": ["весь краснодар", "район не важен", "любой район", "смотрим все", "смотрим всё"],
+            "прикубанский": ["прикубан", "прикубанка"],
+            "карасунский": ["карасун", "карасунка"],
+            "фестивальный": ["фмр", "фестивальн"],
+            "черемушки": ["чмр", "черемуш", "черёмуш"],
+            "гидрострой": ["гмр", "гидростро"],
+            "комсомольский": ["кмр", "комсомольск"],
+            "кск": ["кск"],
+            "хбк": ["хбк"],
+            "пашковский": ["пмр", "пашковск"],
+            "юбилейный": ["юмр", "юбилей"],
+            "восточно-кругликовский": ["восточно кругликов", "восточка", "40 лет", "черкасск"],
+            "губернский": ["губернск"],
+            "западный обход": ["западн обход"],
+            "ближний западный обход": ["ближн западн обход"],
+            "энка": ["энка", "красная площадь"],
+            "музыкальный": ["музыкальн"],
+            "петра метальникова": ["метальников"],
+            "центр": ["цмр", "центр", "красная", "сенной", "вокзал краснодар 1"],
+            "дубинка": ["дубинк"],
+            "северный": ["северн"],
+            "южный": ["южный"],
+            "березовый": ["березов", "берёзов"],
+            "прогресс": ["прогресс"],
+            "витамин": ["витамин"],
+            "елизаветинская": ["елизавет", "елизаветка"],
+            "новая адыгея": ["новая адыгея", "адыгея"],
+            "динская": ["динск"],
+            "российский": ["российск"],
+            "краснодарский": ["краснодарский"],
+            "кирилла россинского": ["россинск"],
+            "знаменский": ["знаменск"],
+            "новознаменский": ["новознаменск"],
+            "ростовское шоссе": ["ростовск шоссе"],
+            "ейское шоссе": ["ейск шоссе"],
+            "парк галицкого": ["парк галицк"],
+          });
+          
+          function detectGeoTerms(text) {
+            const norm = normalizeText(text);
+            const out = [];
+            for (const [canon, aliases] of Object.entries(GEO_ALIASES)) {
+              if (aliases.some(a => norm.includes(normalizeText(a)))) out.push(canon);
+            }
+            // Explicit streets useful for exact/local matching.
+            const streetHints = [
+              "московская","зиповская","промышленная","фабричная","черкасская","красная","ставропольская","тургенева","гаражная","дальняя","гаврилова","дзержинского","морская","рашпилевская","жигуленко","парусная","автолюбителей","рахманинова","достоевского"
+            ];
+            for (const s of streetHints) if (norm.includes(normalizeText(s))) out.push(`улица:${s}`);
+            return [...new Set(out)];
+          }
+          
+          function parseRequestTypes(text) {
+            const raw = String(text ?? "");
+            const norm = normalizeText(raw);
+            const types = new Set();
+            if (/студ/iu.test(norm)) types.add("studio");
+            if (/(?:1\s*(?:к|ком)|одноком|однуш)/iu.test(norm)) types.add("1k");
+            if (/евро\s*[- ]?2|евро2/iu.test(norm)) types.add("euro2");
+            if (/(?:2\s*(?:к|ком)|двуш)/iu.test(norm)) types.add("2k");
+            if (/(?:3\s*(?:к|ком)|тр[её]ш)/iu.test(norm)) types.add("3k");
+            // Realtor shorthand: "1-2к" or "1,2 к" means both one- and two-room options.
+            if (/1\s*[-–—,/]\s*2\s*(?:к|ком)/iu.test(raw)) { types.add("1k"); types.add("2k"); }
+            if (/коммерц|общепит|нежил/iu.test(norm)) types.add("commercial");
+            const apartmentMention = [...types].some(t => ["studio","1k","euro2","2k","3k"].includes(t));
+            if (!apartmentMention && /(?:^|\s)(?:дом|дача|коттедж)(?:\s|$)|таунхаус|дуплекс|часть\s+дома/iu.test(norm)) types.add("house");
+            if (/часть\s+дома|таунхаус|дуплекс|квартира\s+на\s+земле/iu.test(norm)) types.add("ground-format");
+            return [...types];
+          }
+          
+
+          // OBJECT TYPE PARSER v1.4.4 — object-source only.
+          // Keeps the CLOSED request parser unchanged and broadens only live object classification.
+          function parseObjectTypes(text) {
+            const raw = String(text ?? "");
+            const norm = normalizeText(raw);
+            const types = new Set(parseRequestTypes(raw));
+
+            const addRoomCount = n => {
+              const v = Number(n);
+              if (Number.isInteger(v) && v >= 1 && v <= 9) types.add(`${v}k`);
+            };
+
+            // Numeric room forms: 2-комнатная, 2 х комнатная, 2х-комн., 4 ккв, etc.
+            for (const m of norm.matchAll(/(?:^|\s)([1-9])\s*(?:х\s*)?(?:к\s*кв|ккв|комн|комнат|квартира)/giu)) {
+              addRoomCount(m[1]);
+            }
+
+            // Word room forms missed by the request parser.
+            if (/однокомнат|однокомн/iu.test(norm)) types.add("1k");
+            if (/двухкомнат|двухкомн|двукомнат/iu.test(norm)) types.add("2k");
+            if (/тр[её]хкомнат|тр[её]хкомн/iu.test(norm)) types.add("3k");
+            if (/четыр[её]хкомнат|четыр[её]хкомн/iu.test(norm)) types.add("4k");
+            if (/пятикомнат|пятикомн/iu.test(norm)) types.add("5k");
+            if (/шестикомнат|шестикомн/iu.test(norm)) types.add("6k");
+
+            // Euro-layout forms are kept distinct so MATCH never silently equates them with classic room counts.
+            for (const m of norm.matchAll(/евро\s*([2-6])(?:\s|$)/giu)) types.add(`euro${m[1]}`);
+            if (/евродв|евро\s*дв/iu.test(norm)) types.add("euro2");
+            if (/евротр[её]ш|евро\s*тр[её]ш/iu.test(norm)) types.add("euro3");
+            if (/еврочетыр|евро\s*четыр/iu.test(norm)) types.add("euro4");
+
+            // Other legitimate object classes. They stay in the object source;
+            // current MVP request scope still prevents unsupported request classes from matching.
+            if (/апартамент|апарт\s*отел/iu.test(norm)) types.add("apartments");
+            if (/пентхаус/iu.test(norm)) types.add("penthouse");
+            if (/комната|комнату|комнаты|комнате/iu.test(norm) && ![...types].some(t => /^(?:[1-9]k|euro[2-6])$/.test(t))) types.add("room");
+            if (/гараж|машино\s*мест|машиномест|паркинг/iu.test(norm)) types.add("parking");
+            if (/участок|земельн|земля/iu.test(norm) && !types.has("house") && !types.has("ground-format")) types.add("land");
+            if (/офис|торгов(?:ое|ая)\s+помещ|склад|помещение\s+свободн|коммерц|общепит|нежил/iu.test(norm)) types.add("commercial");
+
+            return [...types];
+          }
+
+          function objectTypeSelfTest() {
+            const fail = (name, got) => { throw new Error(`OBJECT TYPE SELFTEST ${name}: ${JSON.stringify(got)}`); };
+            const must = (name, text, type) => { const got = parseObjectTypes(text); if (!got.includes(type)) fail(name, got); };
+            must('2x-room', '2-х комнатная квартира', '2k');
+            must('4-room', '4-комнатная квартира', '4k');
+            must('euro3', 'Евро-3', 'euro3');
+            must('apartments', 'Апартаменты', 'apartments');
+            must('room', 'Комната 18 м²', 'room');
+            must('parking', 'Машиноместо в паркинге', 'parking');
+            must('land', 'Участок 6 соток', 'land');
+            return 'OBJECT_TYPE_BROAD_PASS';
+          }
+
+          function parseAreaConstraint(text) {
+            const raw = String(text ?? "");
+            let min = null, max = null, preferred = null;
+            const range = raw.match(/(?:площад(?:ь|и)?\s*)?(\d+(?:[.,]\d+)?)\s*(?:[-–—]|до)\s*(\d+(?:[.,]\d+)?)\s*(?:м2|м²|кв)/iu);
+            if (range) {
+              min = Number(range[1].replace(",", ".")); max = Number(range[2].replace(",", "."));
+            }
+            for (const m of raw.matchAll(/(?:от|минимум)\s*(\d+(?:[.,]\d+)?)\s*(?:м2|м²|кв)/giu)) {
+              const v = Number(m[1].replace(",", ".")); min = min === null ? v : Math.max(min, v);
+            }
+            if (min === null && max === null) {
+              const m = raw.match(/(?:площад(?:ь|и)?\s*[:\-]?\s*|\b)(\d+(?:[.,]\d+)?)\s*(?:м2|м²|кв\.?\s*м|кв\.(?!\s*[а-я]))/iu);
+              if (m) {
+                const v = Number(m[1].replace(",", "."));
+                // Training rule: bare requested area is normally a floor, not an exact equality.
+                if (v >= 18 && v <= 300) min = v;
+              }
+            }
+            const ideal = raw.match(/(?:в идеале|идеально)[^\d]{0,10}(\d+(?:[.,]\d+)?)/iu);
+            if (ideal) {
+              preferred = Number(ideal[1].replace(",", "."));
+              // Training case 58: "100-130, в идеале 130" means 100 is minimum, 130 is ideal, not a ceiling.
+              if (max !== null && Math.abs(max - preferred) < 0.001) max = null;
+            }
+            return {min, max, preferred};
+          }
+          
+          function parseLandConstraint(text) {
+            const raw = String(text ?? "");
+            let min = null;
+            let m = raw.match(/(?:участок|земл(?:я|и))[^\d\n]{0,20}(?:от\s*)?(\d+(?:[.,]\d+)?)\s*сот/iu);
+            if (!m) m = raw.match(/(?:от\s*)?(\d+(?:[.,]\d+)?)\s*(?:сот(?:ок|ки)?\s+)?земл(?:и|я)/iu);
+            if (m) min = Number(m[1].replace(",", "."));
+            return {min};
+          }
+          
+          function parseFloorConstraint(text) {
+            const raw = String(text ?? "");
+            const norm = normalizeText(raw);
+            let min = null, max = null;
+            let m = raw.match(/этаж(?:и|ей)?\s*[:\-]?\s*(\d{1,2})\s*[-–—]\s*(\d{1,2})/iu) || raw.match(/(\d{1,2})\s*[-–—]\s*(\d{1,2})\s*этаж/iu);
+            if (m) { min = Number(m[1]); max = Number(m[2]); }
+            m = raw.match(/до\s*(\d{1,2})\s*(?:этажа|этаж|эт\.?)/iu) || raw.match(/этаж[^.\n;]{0,20}\bдо\s*(\d{1,2})/iu);
+            if (m) max = Number(m[1]);
+            m = raw.match(/(?:этаж[^.\n;]{0,20})?\bот\s*(\d{1,2})\s*(?:этажа|этаж|эт\.?)/iu);
+            if (m) min = Number(m[1]);
+            if (/первые\s+этажи\s+до\s+3|с\s+1\s+по\s+3/iu.test(raw)) { min = 1; max = 3; }
+            return {
+              min, max,
+              excludeFirst: /не\s*(?:1|перв)[^.\n;]{0,20}этаж|этаж[^.\n;]{0,12}не\s*1/iu.test(raw),
+              excludeLast: /не\s*последн[^.\n;]{0,20}этаж|этаж[^.\n;]{0,12}не\s*последн/iu.test(raw),
+              lowerFloors: /нижн(?:ие|их)\s+этаж/iu.test(raw),
+              middleFloors: /средн(?:ий|ие|их|ем)\s+этаж/iu.test(raw),
+            };
+          }
+          
+          function streetStem(value) {
+            let n = normalizeText(value);
+            if (!n) return null;
+            n = n.replace(/(?:ской|ская|скую|ском|ский|ой|ая|ую|ый|ий)$/u, "");
+            return n.length >= 4 ? n : normalizeText(value);
+          }
+          
+          function parseRequest(text) {
+            const raw = String(text ?? "").trim();
+            const norm = normalizeText(raw);
+            if (!raw) return {kind:"IGNORE", reason:"EMPTY"};
+          
+            if (/выкуп\s+недвижим|срочн(?:ый|ая)?\s+выкуп|скупаем\s+квартир/iu.test(raw)) {
+              return {kind:"IGNORE", reason:"BUYOUT_MESSAGE"};
+            }
+
+
+            // MVP rule 05.09.2026:
+            // Explicit HOUSE-from-developer requests are not useful for our MATCH.
+            // "Дом" by itself is NOT an ignore signal; ready/resale houses remain REQUEST.
+            const developerHouseRequest =
+              /(?:дом|коттедж|таунхаус)[^\n]{0,50}(?:от\s+застройщик|у\s+застройщик|застройщик)/iu.test(raw) ||
+              /(?:от\s+застройщик|у\s+застройщик|застройщик)[^\n]{0,50}(?:дом|коттедж|таунхаус)/iu.test(raw);
+            if (developerHouseRequest) {
+              return {kind:"IGNORE", reason:"DEVELOPER_HOUSE_REQUEST"};
+            }
+          
+            const ourObjectMention = /(?:чей\s+объект|отзовитесь[^\n]{0,30}объект|кто\s+(?:отправлял|скидывал|давал)[^\n]{0,30}объект|отзовитесь\s+чей)/iu.test(raw);
+            if (ourObjectMention) return {kind:"OUR_OBJECT_MENTION", raw, norm};
+          
+            const explicitRequestLike = /(?:запрос|нужн[аоы]?|ищу|клиент[^\n]{0,20}(?:ищет|нужн)|кто\s+занимается\s+коммерц|смотрим\s+завтра|готовы\s+на\s+задаток)/iu.test(raw);
+            const propertyShapeLike = /(?:студ|одноком|двуш|тр[её]ш|евро\s*[- ]?2|\d\s*[- ]?(?:к|ком)|дом|дач|коммерц)/iu.test(raw) && /(?:до\s*\d|бюджет|налич|ипотек|жк|район|этаж|ремонт|пчо)/iu.test(raw);
+            const requestLike = explicitRequestLike || propertyShapeLike;
+            if (!requestLike) return {kind:"IGNORE", reason:"NOT_REQUEST"};
+          
+            const types = parseRequestTypes(raw);
+            const budgetMax = parseBudgetMax(raw);
+            const commission = parseCommissionInside(raw);
+            const area = parseAreaConstraint(raw);
+            // Training case 18: "просторная 1к" without a number starts at 45 m².
+            if (area.min === null && /просторн\w*[^\n]{0,20}(?:1\s*(?:к|ком)|одноком|однуш)/iu.test(raw)) area.min = 45;
+            const land = parseLandConstraint(raw);
+            const floor = parseFloorConstraint(raw);
+            const knownJks = detectKnownJks(raw);
+            const geo = detectGeoTerms(raw);
+          
+            const softJkPreference = /(?:желательно|предпочтительно|в приоритете|приоритет)[^\n]{0,80}(?:жк|панорам|премьер|регат|парк|комплекс)/iu.test(raw);
+            const exactOnly = !softJkPreference && (/(?:только|другое\s+не\s+предлагать|именно)[^\n]{0,70}(?:жк|комплекс)|(?:жк[^\n]{0,80})(?:другое\s+не\s+предлагать)/iu.test(raw) || (knownJks.length > 0 && !/(?:и\s+рядом|ближайш|и\s+др\.?|и\s+друг)/iu.test(raw)));
+          
+            const conditions = {
+              repairRequired: /ремонт/iu.test(raw) && !/(?:ремонт\s+не\s+важен|с\s+ремонтом\s+и\s+без|любой\s+ремонт|можно\s+без\s+ремонт)/iu.test(raw),
+              goodRepair: /(?:хорош|приличн|красив)[^\n]{0,35}ремонт|ремонт[^\n]{0,35}(?:хорош|приличн|красив)/iu.test(raw),
+              freshRepair: /(?:свеж|нов(?:ый|ым)|евро)[^\n]{0,18}ремонт|ремонт[^\n]{0,18}(?:свеж|новый)/iu.test(raw) && !/желательно[^\n]{0,25}(?:нов(?:ый|ее)|свеж)|ремонт[^\n]{0,25}желательно[^\n]{0,15}(?:нов(?:ый|ее)|свеж)/iu.test(raw),
+              freshRepairPreferred: /желательно[^\n]{0,30}(?:нов(?:ый|ее)|свеж)|ремонт[^\n]{0,30}желательно[^\n]{0,20}(?:нов(?:ый|ее)|свеж)/iu.test(raw),
+              pchoRequired: /(?:пчо|предчист)/iu.test(raw) && !/(?:не\s+в\s*пчо|пчо\s+не\s+предлаг|можно\s+без\s*пчо)/iu.test(raw),
+              pchoExcluded: /(?:не\s+в\s*пчо|пчо\s+не\s+предлаг|без\s+пчо)/iu.test(raw),
+              furnitureRequired: /мебел[ьюи]/iu.test(raw) && !/(?:мебель\s+не\s+важ|можно\s+без[^\n]{0,15}мебел|мебель[^\n]{0,35}(?:не\s+важ|можно|желательно)|желательно[^\n]{0,35}мебел)/iu.test(raw),
+              appliancesRequired: /техник(?:а|ой|у)/iu.test(raw) && !/(?:техника\s+не\s+важ|можно\s+без[^\n]{0,15}техник|техник[^\n]{0,20}желательно|желательно[^\n]{0,35}техник)/iu.test(raw),
+              anyCondition: /(?:ремонт\s+не\s+важен|с\s+ремонтом\s+и\s+без|любой\s+ремонт|любое\s+состояние)/iu.test(raw),
+              noOldFund: /(?:старый\s+фонд\s*[-—]?\s*нет|старые\s+не\s+предлаг|не\s+старые\s+дома|современные\s+дома)/iu.test(raw),
+              gasRequired: /(?:\bгаз\b|газ\s+по\s+меже|дом\s+с\s+газом)/iu.test(raw),
+              courtyardWindows: /окн(?:а|ами)\s+во\s+двор/iu.test(raw),
+              quietRequired: /тихое\s+место[^\n]{0,20}(?:ключ|важ)|ключев[^\n]{0,20}тих/iu.test(raw),
+              centralHeating: /центральн(?:ое|ым)\s+отоплен/iu.test(raw),
+              livableRequired: /жилое\s+состояние|хорош(?:ее|ем)\s+состояние|ремонт\s+не\s+убит|не\s+убит(?:ый|ом)\s+ремонт/iu.test(raw),
+              secondaryRequired: /вторичк/iu.test(raw),
+              foodServiceRequired: /под\s+общепит|общепит/iu.test(raw),
+              directRiverRequired: /(?:обязательн[^\n]{0,25})?прям(?:ой|ым)?\s+выход[^\n]{0,20}(?:к|на)\s+рек|выход\s+к\s+рек/iu.test(raw),
+              apartmentLegalStatusRequired: /часть\s+дома[^\n]{0,45}(?:в\s+статусе\s+квартир|статус\s+квартир)/iu.test(raw),
+              houseRiskCheckRequired: /благополучн(?:ые|ый|ом)\s+дом/iu.test(raw),
+              firstLineStreet: (() => { const m=raw.match(/первая\s+линия(?:\s+(?:ул\.?|улиц[аы]))?\s+([А-ЯЁA-Z][А-Яа-яЁёA-Za-z-]+)/iu); return m ? streetStem(m[1]) : null; })(),
+              conditionalLiftFloor: /2\s*[-–—]\s*7[^\n]{0,25}с\s+лифт[а-я]*[^\n]{0,35}2\s*[-–—]\s*3[^\n]{0,25}без\s+лифт/iu.test(raw) ? {min:2,maxWithLift:7,maxWithoutLift:3} : null,
+              modernOnly1k: /1\s*[- ]?(?:к|ком)[^\n]{0,40}современн[^\n]{0,50}(?:или|\/)\s*2\s*[- ]?(?:к|ком)[^\n]{0,40}стар(?:ый|ого)\s+фонд/iu.test(raw) || /1-комнатн[^\n]{0,40}современн[^\n]{0,50}2-комнатн[^\n]{0,40}стар(?:ый|ого)\s+фонд/iu.test(raw),
+              symphonyInnerCluster: knownJks.includes("симфония") && /не\s+перв[а-я]*\s+дом[а-я]*\s+у\s+дорог/iu.test(raw) && /трамва/iu.test(raw),
+              tramNearMoskovskaya: /московск[^\n]{0,35}(?:ближе|недалеко|не\s+далеко)[^\n]{0,25}трамва/iu.test(raw),
+              stationKrasnodar1Walking: /район[^\n]{0,15}вокзал[а]?\s+краснодар\s*[-–—]?\s*1/iu.test(raw),
+              tabrisSideRequired: /жигуленко[^\n]{0,80}сторон[аеы][^\n]{0,15}табрис|сторон[аеы][^\n]{0,15}табрис[^\n]{0,80}жигуленко/iu.test(raw),
+              // Case 19 correction: realtor clarified that "дома от 3 этажей" means normal multi-apartment stock, minimum 4-storey building.
+              buildingMinFloors: /дом(?:а|е)?[^\n]{0,20}от\s*3\s*этаж/iu.test(raw) ? 4 : null,
+              wholeContractAmount: /(?:вся|полная)\s+сумма\s+(?:в|по)\s+(?:дкп|договор)/iu.test(raw) && !/минимальн[а-я]*\s+разбивк[^\n]{0,30}(?:или|либо)[^\n]{0,30}(?:вся|полная)\s+сумма/iu.test(raw),
+              contractFullOrMinimalSplit: /минимальн[а-я]*\s+разбивк[^\n]{0,30}(?:или|либо)[^\n]{0,30}(?:вся|полная)\s+сумма|(?:вся|полная)\s+сумма[^\n]{0,30}(?:или|либо)[^\n]{0,30}минимальн[а-я]*\s+разбивк/iu.test(raw),
+              maxHouseAgeYears: (() => {
+                const m = raw.match(/дом[^.\n;]{0,20}не\s+старше\s+(\d{1,2})\s+лет/iu);
+                if (m) return Number(m[1]);
+                if (/современные\s+дома|не\s+старые\s+дома/iu.test(raw)) return 12;
+                return null;
+              })(),
+            };
+          
+            // If PCHO is merely one alternative alongside repair/no repair, it is allowed but not required (case 61).
+            if (/(?:с\s+ремонтом\s+и\s+без)[^\n]{0,50}(?:или\s+)?пчо|(?:или\s+пчо)/iu.test(raw)) conditions.pchoRequired = false;
+          
+            // Training correction: "ремонт, мебель и техника (можно)" means all three may be absent.
+            if (/(?:ремонт[^\n]{0,30}мебел[^\n]{0,30}техник)[^\n]{0,20}(?:можно|возможно)/iu.test(raw)) {
+              conditions.repairRequired = false; conditions.furnitureRequired = false; conditions.appliancesRequired = false;
+            }
+          
+            const exclusiveOnly = /только\s+(?:свои\s+)?экс|только\s+эксклюзив|свои\s+эксы/iu.test(raw);
+            const noAdvertisingMention = /без\s+авито|без\s+реклам|не\s+в\s+реклам|внешн(?:их|ие)\s+(?:источник|площадк)/iu.test(raw);
+            const preferNoAdvertising = noAdvertisingMention && /желательно[^\n]{0,30}без\s+авито|предпочтительно[^\n]{0,30}без\s+авито/iu.test(raw);
+            const noAdvertising = noAdvertisingMention && !preferNoAdvertising;
+            const noTrain = /без\s+паровоз/iu.test(raw);
+            const investorExcluded = /инвесторск[^\n]{0,20}не\s+предлаг|не\s+предлаг[^\n]{0,20}инвестор/iu.test(raw);
+            const urgent = /срочн|сегодня\s+(?:задаток|смотрим|показ)|больше\s+времени\s+нет/iu.test(raw);
+            const familyMortgage = /семейн(?:ая|ой)\s+ипотек/iu.test(raw);
+            const mortgage = familyMortgage || /ипотек/iu.test(raw);
+            const cash = /налич/iu.test(raw);
+            const financeBudgets = parseConditionalFinanceBudgets(raw);
+            const typeBudgets = parseTypeSpecificBudgets(raw);
+            const bankSber = /сбер/iu.test(raw);
+            const bigKitchen = /больш(?:ая|ой)\s+кухн/iu.test(raw);
+            const minBedrooms = (() => { const m = raw.match(/(?:от|минимум)\s*(\d+)\s+(?:спален|спальн)|(?:дом[^\n]{0,20})?(\d+)\s+(?:спален|спальн)/iu); return m ? Number(m[1] || m[2]) : null; })();
+            const firstPrice = /перв(?:ая|ым|ые|ых)\s+цен/iu.test(raw);
+            const preferences = {
+              brick:/в\s+приоритете[^\n]{0,30}кирпич|приоритет[^\n]{0,30}кирпич/iu.test(raw),
+              freshRepair:conditions.freshRepairPreferred,
+              noAdvertising:preferNoAdvertising,
+              lowerFloors:floor.lowerFloors,
+            };
+          
+            return {
+              kind:"REQUEST", raw, norm, urgent, types, budgetMax, commission, area, land, floor,
+              knownJks, exactJkOnly:exactOnly, geo, conditions, exclusiveOnly, noAdvertising, preferNoAdvertising, noTrain, investorExcluded,
+              finance:{mortgage, familyMortgage, cash, bankSber}, financeBudgets, typeBudgets, bigKitchen, minBedrooms, firstPrice, preferences,
+            };
+          }
+          
+          
+
+          // ============================================================
+          // MVP PRODUCTION SCOPE FILTER v1.0 — 05.09.2026
+          // KEEP: apartment requests + ready/resale house requests.
+          // IGNORE: developer/newbuild houses, land-only, commercial,
+          // broad investment fishing, promo/info/advertising posts.
+          // Core 61-case parser remains intact; this is a production gate on top.
+          // ============================================================
+          function applyMvpScope(core, text) {
+            const raw = String(text ?? "").trim();
+            const norm = normalizeText(raw);
+
+            const promoInfo =
+              /(?:удобн[а-яёa-z]*\s+сайт\s+для\s+поиска\s+недвиж|актуальн[а-яёa-z]*\s+прайс|ежедневн[а-яёa-z]*\s+рассылк|реклам[а-яёa-z]*\s+в\s+групп|наш\s+max\s+канал|подписывай[а-яёa-z]*\s+на\s+сообществ|сайт\s+с\s+объектами|прайс\s+квартир)/iu.test(raw) ||
+              (/(?:https?:\/\/|www\.)/iu.test(raw) && /(?:прайс|канал|рассылк|реклам|сайт|подписывай)/iu.test(raw));
+            if (promoInfo) return {kind:"IGNORE", reason:"PROMO_INFO", coreKind:core?.kind || "UNKNOWN"};
+
+            const broadInvestor =
+              /(?:выгодн[а-яёa-z]*\s+влож|инвестир[а-яёa-z]*|инвестиц[а-яёa-z]*)/iu.test(raw) &&
+              /(?:участок|земл|коммерц|дом|квартир)/iu.test(raw) &&
+              /(?:ликвидн|ниже\s+рынк|срочн[а-яёa-z]*\s+продаж|интересн[а-яёa-z]*\s+объект|присылайте\s+(?:ваши\s+)?(?:экс|вариант|объект))/iu.test(raw);
+            if (broadInvestor) return {kind:"IGNORE", reason:"BROAD_INVESTOR_REQUEST", coreKind:core?.kind || "UNKNOWN"};
+
+            if (!core || core.kind !== "REQUEST") return core;
+
+            const types = Array.isArray(core.types) ? core.types : [];
+            if (types.includes("commercial") || /(?:коммерц|общепит|нежил)/iu.test(norm)) {
+              return {kind:"IGNORE", reason:"OUT_OF_SCOPE_COMMERCIAL", coreKind:core.kind};
+            }
+
+            const landOnly = /(?:участок|земл[а-яёa-z]*)/iu.test(raw) &&
+              !/(?:квартир|студ|одноком|двуш|тр[её]ш|евро\s*[- ]?2|(?:^|\s)\d\s*[- ]?(?:к|ком)|дом|коттедж|таунхаус)/iu.test(raw);
+            if (landOnly) return {kind:"IGNORE", reason:"OUT_OF_SCOPE_LAND", coreKind:core.kind};
+
+            const apartmentTypes=["studio","1k","euro2","2k","3k"];
+            const hasApartment=types.some(t=>apartmentTypes.includes(t));
+            const hasReadyHouse=types.includes("house");
+            if (!hasApartment && !hasReadyHouse) return {kind:"IGNORE", reason:"OUT_OF_SCOPE_OTHER", coreKind:core.kind};
+            return core;
+          }
+
+          function parseObservedMessage(text) {
+            return applyMvpScope(parseRequest(text), text);
+          }
+
+          function mvpScopeSelfTest() {
+            const fail=(name,detail='')=>{throw new Error(`MVP SCOPE SELFTEST ${name}${detail?': '+detail:''}`)};
+            let x;
+            x=parseObservedMessage("ИНФОРМАЦИЯ. Удобный сайт для поиска недвижимости. ПРАЙС. Подписывайся на сообщество, ежедневная рассылка, реклама в группах.");
+            if(x.kind!=="IGNORE"||x.reason!=="PROMO_INFO") fail("promo-info",JSON.stringify(x));
+            x=parseObservedMessage("ЗАПРОС: выгодно вложить в недвижимость 5-6 млн с моими %. Участок, дом, квартира, коммерция. Нужны ликвидные интересные объекты на срочной продаже. Присылайте ваши эксы.");
+            if(x.kind!=="IGNORE"||x.reason!=="BROAD_INVESTOR_REQUEST") fail("broad-investor",JSON.stringify(x));
+            x=parseObservedMessage("Кто занимается коммерцией? Нужна улица Красная, под общепит. Завтра смотрим.");
+            if(x.kind!=="IGNORE"||x.reason!=="OUT_OF_SCOPE_COMMERCIAL") fail("commercial",JSON.stringify(x));
+            x=parseObservedMessage("Нужен участок 6 соток, район Северный, до 4 млн.");
+            if(x.kind!=="IGNORE") fail("land-only",JSON.stringify(x));
+            x=parseObservedMessage("Нужен дом от застройщика. Карасунский округ. Семейная ипотека.");
+            if(x.kind!=="IGNORE"||x.reason!=="DEVELOPER_HOUSE_REQUEST") fail("developer-house",JSON.stringify(x));
+            x=parseObservedMessage("Нужен готовый дом. Карасунский округ. До 9 млн. Семейная ипотека.");
+            if(x.kind!=="REQUEST"||!x.types.includes("house")) fail("ready-house",JSON.stringify(x));
+            x=parseObservedMessage("Запрос. 2к квартира, ФМР, до 8 млн, наличные.");
+            if(x.kind!=="REQUEST"||!x.types.includes("2k")) fail("apartment",JSON.stringify(x));
+            return "MVP_SCOPE_FILTER_PASS";
+          }
+
+          // ============================================================
+          // LIVE OBJECT SOURCE + MATCH DRY v1.4
+          // ============================================================
+          function toMsTimestamp(t) {
+            const n = Number(t || 0);
+            if (!Number.isFinite(n) || n <= 0) return 0;
+            return n < 10_000_000_000 ? n * 1000 : n;
+          }
+
+          function extractExplicitJks(text) {
+            const raw = String(text ?? "");
+            const out = [];
+            for (const m of raw.matchAll(/жк\s+([а-яёa-z0-9][^,\n;:()]{1,60})/giu)) {
+              let name = normalizeText(m[1]).trim();
+              if (name.length >= 2) out.push(name);
+            }
+            return [...new Set(out)];
+          }
+
+          function parseObjectPrice(text) {
+            const raw = String(text ?? "").replace(/\u00A0|\u202F/g, " ");
+            const vals = [];
+            for (const m of raw.matchAll(/(\d{1,3}(?:\s\d{3}){1,2})\s*(?:₽|руб(?:лей|ля|\.)?)/giu)) {
+              const v = Number(m[1].replace(/\s/g, ""));
+              if (v >= 500_000 && v <= 100_000_000) vals.push(v);
+            }
+            for (const m of raw.matchAll(/(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?)/giu)) {
+              const v = moneyTokenToRub(m[1], m[2]);
+              if (v) vals.push(v);
+            }
+            return vals.length ? Math.max(...vals) : null;
+          }
+
+          function parseObjectArea(text) {
+            const vals = [];
+            for (const m of String(text ?? "").matchAll(/(\d+(?:[.,]\d+)?)\s*(?:м2|м²|кв\.?\s*м)/giu)) {
+              const v = Number(m[1].replace(",", "."));
+              if (v >= 18 && v <= 500) vals.push(v);
+            }
+            return vals.length ? Math.max(...vals) : null;
+          }
+
+          function parseObjectFloor(text) {
+            const raw = String(text ?? "");
+            const m = raw.match(/(\d{1,2})\s*\/\s*(\d{1,2})\s*(?:этаж|эт)?/iu);
+            return m ? {floor:Number(m[1]), total:Number(m[2])} : {floor:null,total:null};
+          }
+
+          function parseObjectMessage(m) {
+            const raw = messageText(m).trim();
+            if (!raw) return null;
+            const types = parseObjectTypes(raw);
+            const price = parseObjectPrice(raw);
+            if (!types.length || price === null) return null;
+            const fl = parseObjectFloor(raw);
+            const pcho = /(?:пчо|предчист)/iu.test(raw);
+            return {
+              objectId: messageId(m) || `obj:${messageTime(m)}:${raw.slice(0,50)}`,
+              time: iso(messageTime(m)),
+              sourceText: raw,
+              norm: normalizeText(raw),
+              profile:{address:raw.split(/\n+/).slice(0,3).join(" | ").slice(0,300)},
+              types,
+              price,
+              area: parseObjectArea(raw),
+              land: parseLandConstraint(raw).min,
+              floor: fl.floor,
+              totalFloors: fl.total,
+              explicitJks: extractExplicitJks(raw),
+              geo: detectGeoTerms(raw),
+              routeCorpus: normalizeText(raw),
+              repair: /ремонт/iu.test(raw) && !pcho && !/без\s+ремонт|чернов/iu.test(raw),
+              freshRepair: /(?:современн|свеж|нов|евро|дизайнерск)[^\n]{0,25}ремонт|ремонт[^\n]{0,25}(?:современн|свеж|нов|евро|дизайнерск)/iu.test(raw),
+              pcho,
+              furniture:/мебел/iu.test(raw),
+              appliances:/техник/iu.test(raw),
+              gas:/(?:^|[^а-яa-z])газ(?:[^а-яa-z]|$)|газифиц/iu.test(raw),
+              courtyardWindows:/окн[^\n]{0,20}во\s+двор/iu.test(raw),
+              centralHeating:/центральн[^\n]{0,12}отоплен/iu.test(raw),
+              offMarket:/без\s+авито|не\s+в\s+реклам|нет\s+в\s+реклам/iu.test(raw),
+              directChain:true,
+            };
+          }
+
+          function requestGeoMatchesObject(req,obj) {
+            if (!req.geo?.length || req.geo.includes("весь краснодар")) return true;
+            const corpus = `${obj.norm} ${obj.routeCorpus}`;
+            return req.geo.some(g => {
+              if (g.startsWith("улица:")) return corpus.includes(normalizeText(g.slice(6)));
+              return (GEO_ALIASES[g] || [g]).some(a => corpus.includes(normalizeText(a)));
+            });
+          }
+
+          function requestJkMatchesObject(req,obj) {
+            const explicitReq = extractExplicitJks(req.raw || "");
+            if (explicitReq.length) {
+              return explicitReq.some(r => obj.explicitJks.some(o => o === r || o.includes(r) || r.includes(o)));
+            }
+            if (!req.knownJks?.length) return true;
+            return req.knownJks.some(jk => (REQUEST_JK_ALIASES[jk] || [jk]).some(a => obj.norm.includes(normalizeText(a))));
+          }
+
+          function matchRequestToLiveObject(req,obj) {
+            const reasons = [];
+            const fail = reason => ({match:false,reason,reasons});
+            if (req.types?.length && !req.types.some(t => obj.types.includes(t) || (t==="ground-format" && obj.types.includes("house")))) return fail("TYPE_MISS");
+            reasons.push("TYPE");
+            if (!requestJkMatchesObject(req,obj)) return fail("JK_MISS");
+            if (extractExplicitJks(req.raw||"").length || req.knownJks?.length) reasons.push("JK");
+            if (!requestGeoMatchesObject(req,obj)) return fail("GEO_MISS");
+            if (req.geo?.length) reasons.push("GEO");
+
+            let budget = req.budgetMax;
+            const tb = obj.types.map(t => req.typeBudgets?.[t]).filter(Number.isFinite);
+            if (tb.length) budget = Math.max(...tb);
+            if (budget != null && req.commission?.inside && req.commission?.amount) budget -= req.commission.amount;
+            if (budget != null && obj.price > budget) return fail("PRICE_MISS");
+            if (budget != null) reasons.push("PRICE");
+
+            if (req.area?.min != null && (obj.area == null || obj.area < req.area.min)) return fail("AREA_MIN_MISS");
+            if (req.area?.max != null && (obj.area == null || obj.area > req.area.max)) return fail("AREA_MAX_MISS");
+            if (req.floor?.min != null && (obj.floor == null || obj.floor < req.floor.min)) return fail("FLOOR_MIN_MISS");
+            if (req.floor?.max != null && (obj.floor == null || obj.floor > req.floor.max)) return fail("FLOOR_MAX_MISS");
+            if (req.floor?.excludeFirst && obj.floor === 1) return fail("FIRST_FLOOR_EXCLUDED");
+            if (req.floor?.excludeLast && obj.floor != null && obj.totalFloors != null && obj.floor === obj.totalFloors) return fail("LAST_FLOOR_EXCLUDED");
+
+            const c = req.conditions || {};
+            if (c.pchoRequired && !obj.pcho) return fail("PCHO_REQUIRED");
+            if (c.pchoExcluded && obj.pcho) return fail("PCHO_EXCLUDED");
+            if (c.repairRequired && !obj.repair) return fail("REPAIR_REQUIRED");
+            if (c.goodRepair && !obj.repair) return fail("GOOD_REPAIR_REQUIRED");
+            if (c.freshRepair && !obj.freshRepair) return fail("FRESH_REPAIR_REQUIRED");
+            if (c.furnitureRequired && !obj.furniture) return fail("FURNITURE_REQUIRED");
+            if (c.appliancesRequired && !obj.appliances) return fail("APPLIANCES_REQUIRED");
+            if (c.gasRequired && !obj.gas) return fail("GAS_REQUIRED");
+            if (c.courtyardWindows && !obj.courtyardWindows) return fail("COURTYARD_WINDOWS_REQUIRED");
+            if (c.centralHeating && !obj.centralHeating) return fail("CENTRAL_HEATING_REQUIRED");
+            if (req.noAdvertising && !obj.offMarket) return fail("OFF_MARKET_UNCONFIRMED");
+            return {match:true,reason:"MATCH",reasons};
+          }
+
+          function objectMatchSelfTest() {
+            const fail=(n,d='')=>{throw new Error(`OBJECT MATCH SELFTEST ${n}${d?': '+d:''}`)};
+            const obj=parseObjectMessage({id:"o1",timestamp:Date.now(),text:"🏠 ЖК Дарград, Новая Адыгея, Тургеневское шоссе\n🔹 Евро-2\n🔹 33 м²\n🔹 4/5 этаж\n🔹 Современный ремонт / мебель / техника\n💰 4 450 000 ₽"});
+            if(!obj || obj.price!==4450000 || !obj.types.includes("euro2") || obj.area!==33 || obj.floor!==4 || obj.totalFloors!==5) fail("parse",JSON.stringify(obj));
+            const good=parseObservedMessage("Запрос. Евро-2 ЖК Дарград. До 4,6 млн. Не выше 5 этажа.");
+            if(good.kind!=="REQUEST" || !matchRequestToLiveObject(good,obj).match) fail("positive");
+            const bad=parseObservedMessage("Запрос. 2к ЖК Лучший, Ростовское шоссе. ПЧО. Не выше 9 этажа.");
+            if(matchRequestToLiveObject(bad,obj).match) fail("negative");
+            return "OBJECT_MATCH_DRY_PASS";
+          }
+
+          async function discoverChatByExactTitle(client,title) {
+            const wanted=normalizeText(title);
+            let rows=[];
+            try {
+              const got=await client.getChats(200,0);
+              if(Array.isArray(got)) rows=got;
+              else if(Array.isArray(got?.chats)) rows=got.chats;
+              else if(Array.isArray(got?.payload?.chats)) rows=got.payload.chats;
+            } catch {}
+            if(!rows.length && Array.isArray(client?.lastSyncPayload?.chats)) rows=client.lastSyncPayload.chats;
+            return rows.find(c=>normalizeText(c?.title||c?.name||"")===wanted) || null;
+          }
+
+
+          function parserSelfTest() {
+            const fail = (name, detail='') => { throw new Error(`REQUEST PARSER SELFTEST ${name}${detail ? ': '+detail : ''}`); };
+          
+            let x;
+            x = parseRequest("Срочный запрос! ЖК Альфа (Кино). 2-к до 5 этажа, окна во двор. 6500 нал.");
+            if (x.kind !== 'REQUEST' || !x.urgent || !x.conditions.courtyardWindows || x.floor.max !== 5 || x.budgetMax !== 6500000 || !x.exactJkOnly) fail('case27');
+          
+            x = parseRequest("Трёшка до 8 млн наличка. Первые этажи до 3. ЖК Смородина.");
+            if (!x.types.includes('3k') || x.floor.min !== 1 || x.floor.max !== 3 || !x.knownJks.includes('смородина')) fail('case25');
+          
+            x = parseRequest("Запрос. Выкуп недвижимости. Студии 1к 2к. Главный критерий ниже рынка.");
+            if (x.kind !== 'IGNORE' || x.reason !== 'BUYOUT_MESSAGE') fail('case35');
+
+
+            x = parseRequest("Нужен дом от застройщика. Карасунский округ. Семейная ипотека.");
+            if (x.kind !== 'IGNORE' || x.reason !== 'DEVELOPER_HOUSE_REQUEST') fail('developer-house-ignore');
+
+            x = parseRequest("Нужен готовый дом. Карасунский округ. До 9 млн. Семейная ипотека.");
+            if (x.kind !== 'REQUEST' || !x.types.includes('house')) fail('ready-house-kept');
+          
+            x = parseRequest("Коллеги, отправляли дом в СНТ Мечта за 3500. Отзовитесь, чей объект?");
+            if (x.kind !== 'OUR_OBJECT_MENTION') fail('case34');
+          
+            x = parseRequest("Студия. До 4 млн с нашими 200. ДРУГОЕ НЕ ПРЕДЛАГАТЬ. ЖК Облака, Сармат, Южане. Ремонт, мебель, техника (можно).");
+            if (x.budgetMax !== 4000000 || x.commission.amount !== 200000 || !x.commission.inside || x.conditions.repairRequired || !x.exactJkOnly) fail('case45');
+          
+            x = parseRequest("Запрос. 1-ком ЖК Симфония и рядом, не первые дома у дороги, но и не далеко от трамвая. До 6 этажа.");
+            if (!x.conditions.symphonyInnerCluster || x.floor.max !== 6) fail('case30');
+          
+            x = parseRequest("ЮМР 1-комн 40 м². Дом с газом. Не первый и не последний этаж. До 6 млн. С ремонтом и без, или ПЧО.");
+            if (x.area.min !== 40 || !x.conditions.gasRequired || !x.floor.excludeFirst || !x.floor.excludeLast || x.conditions.pchoRequired || x.budgetMax !== 6000000) fail('case61');
+          
+            x = parseRequest("Запрос. Однушка и двушка. Любимово или Образцово. Двушка — 9–9,5 млн. Однушка — 5–5,5 млн");
+            if (x.typeBudgets['1k'] !== 5500000 || x.typeBudgets['2k'] !== 9500000) fail('case52', JSON.stringify(x.typeBudgets));
+          
+            x = parseRequest("Запрос! ЧМР, Центр. Студия. Дома от 3 этажей с центральным отоплением. До 4000, наличные.");
+            if (x.conditions.buildingMinFloors !== 4 || !x.conditions.centralHeating || x.budgetMax !== 4000000) fail('case19');
+          
+            x = parseRequest("ФМР. 1к с евроремонтом! Именно с евро, новые. 10-летней давности не подходят. С минимальной разбивкой или полная сумма в договоре — это важно. Без Авито. Бюджет 9–9,5 млн.");
+            if (!x.conditions.contractFullOrMinimalSplit || x.conditions.wholeContractAmount || !x.noAdvertising || x.budgetMax !== 9500000) fail('case60');
+          
+            x = parseRequest("Запрос. Просторная 1к Центр. Желательно без Авито.");
+            if (x.area.min !== 45 || x.noAdvertising || !x.preferNoAdvertising) fail('case18');
+          
+            x = parseRequest("Запрос. Дом 60 кв., 7 земли, ремонт, мебель, до 5.700 (мои 200), ипотека 50/50 ПВ. Ростовское / Ейское шоссе.");
+            if (x.budgetMax !== 5700000 || x.area.min !== 60 || x.land.min !== 7 || x.commission.amount !== 200000) fail('case46');
+          
+            x = parseRequest("Студия или однокомнатная. Наличка 3500. Район ГМР. Желательно Парусная Регата, Премьера. Старые не предлагать.");
+            if (x.budgetMax !== 3500000 || !x.geo.includes('гидрострой') || !x.conditions.noOldFund) fail('case47');
+          
+            x = parseRequest("Запрос! ЧМР, ХБК. Часть дома в статусе квартиры или отдельный дом. 3 изолированные комнаты, жилое состояние, до 6500.");
+            if (!x.geo.includes('хбк') || !x.conditions.apartmentLegalStatusRequired || !x.conditions.livableRequired) fail('case53');
+          
+            x = parseRequest("Нужен дом. Обязательно прямой выход к реке. До 7 млн.");
+            if (!x.conditions.directRiverRequired || x.budgetMax !== 7000000) fail('case28');
+          
+            x = parseRequest("Студия. Первая линия ул. Московской. До 2,8 млн.");
+            if (x.conditions.firstLineStreet !== 'москов' || x.budgetMax !== 2800000) fail('case37', String(x.conditions.firstLineStreet));
+          
+            x = parseRequest("ЦМР в шаговой до Красной. ФМР. 1-комнатная от 40 м², современный фонд или 2-комнатная, старый фонд. Хороший ремонт, желательно новый. Этаж 2–7 с лифтом; 2–3 без лифта. До 7 млн.");
+            if (!x.conditions.goodRepair || x.conditions.freshRepair || !x.preferences.freshRepair || !x.conditions.modernOnly1k || !x.conditions.conditionalLiftFloor) fail('case29');
+          
+            x = parseRequest("Запрос. Жигуленко и ближайшие по стороне Табриса. 2к. До 6,2 млн.");
+            if (!x.conditions.tabrisSideRequired || x.budgetMax !== 6200000) fail('case51');
+          
+            x = parseRequest("Срочно‼️ По первым ценам район Петра Метальникова, Жигуленко. ПЧО. 1,2 к кв. Предложите свои варианты.");
+            if (!x.urgent || !x.firstPrice || !x.conditions.pchoRequired || x.budgetMax !== null) fail('case55');
+          
+            x = parseRequest("Запрос: дом, 4 спальни. Карасунский округ. Семейная ипотека. Бюджет 9 500.");
+            if (!x.types.includes('house') || x.minBedrooms !== 4 || !x.finance.familyMortgage || x.budgetMax !== 9500000) fail('case56');
+          
+            x = parseRequest("Запрос. 1–2к кв, до 6 этажа, улицы: Зиповская, Московская (ближе к трамваю), Промышленная, Фабричная. Квартира с ремонтом, мебелью, техникой (желательно), с большой кухней. Бюджет до 7,5 млн (с нашими 200, наличные). Смотрим завтра с 12:00.");
+            if (!x.bigKitchen || x.floor.max !== 6 || x.budgetMax !== 7500000 || x.commission.amount !== 200000 || !x.commission.inside || !x.conditions.tramNearMoskovskaya) fail('case57');
+          
+            x = parseRequest("Дом от 100–130 квадратов (в идеале 130). Участок от 4 соток. От 3 спален. Желаемый район Северный, Южный, на крайний случай Берёзовый. Рассмотрим с ремонтом и без. Если семейная ипотека — 13 млн, если наличные — до 10 млн. С нашими внутри 200 000. Смотрим завтра.");
+            if (x.area.min !== 100 || x.land.min !== 4 || x.minBedrooms !== 3 || x.financeBudgets.familyMortgageMax !== 13000000 || x.financeBudgets.cashMax !== 10000000 || x.commission.amount !== 200000) fail('case58');
+          
+            x = parseRequest("Кто занимается коммерцией? Нужна улица Красная, или Сенной рынок, или Ставропольская возле вузов!!! Под общепит. Напишите мне, кто занимается коммерцией именно там! Завтра смотрим с клиентом.");
+            if (!x.types.includes('commercial') || !x.conditions.foodServiceRequired || x.budgetMax !== null) fail('case59');
+          
+            return '61_CASE_RULESET_CORE_PASS / PORT_PASS';
+          }
+          
+
+          async function main() {
+            let client = null;
+            try {
+              const parserStatus = parserSelfTest();
+              console.log(`REQUEST PARSER SELFTEST: ${parserStatus}`);
+              const scopeStatus = mvpScopeSelfTest();
+              console.log(`MVP SCOPE SELFTEST: ${scopeStatus}`);
+              const objectMatchStatus = objectMatchSelfTest();
+              console.log(`OBJECT MATCH SELFTEST: ${objectMatchStatus}`);
+              const objectTypeStatus = objectTypeSelfTest();
+              console.log(`OBJECT TYPE SELFTEST: ${objectTypeStatus}`);
+
+              // GitHub preflight BEFORE MAX login, so a rotated token is never lost
+              // because of a missing GitHub permission.
+              let stateIssue = await findIssueByTitle(STATE_TITLE);
+              const initialCursor = stateIssue ? parseCursor(stateIssue.body) : { version: 2, chats: {} };
+              const encrypted = stateIssue ? parseEncryptedSession(stateIssue.body) : null;
+              const restoredSession = decryptSession(encrypted, BOOTSTRAP_RAW);
+
+              if (!stateIssue) {
+                stateIssue = await ensureIssue(STATE_TITLE, stateBody(initialCursor, null));
+                await gh(`/issues/${stateIssue.number}`, { method: 'PATCH', body: { state: 'closed' } });
+              }
+
+              const feedIssue = await ensureIssue(
+                FEED_TITLE,
+                [
+                  `@${GH_OWNER}`,
+                  '',
+                  'PHILIPPOV MAX OBSERVER V2 FINAL',
+                  'READ ONLY',
+                  'PUBLIC REPO SAFETY: RAW MAX TEXT IS STORED ONLY ENCRYPTED',
+                  `TARGET CHAT: ${TARGET_CHAT_NAME_FALLBACK} [${TARGET_CHAT_ID}]`,
+                ].join('\n'),
+              );
+
+              fs.mkdirSync(path.dirname(SESSION_FILE), { recursive: true });
+              if (restoredSession && typeof restoredSession === 'object') {
+                fs.writeFileSync(SESSION_FILE, JSON.stringify(restoredSession, null, 2), 'utf8');
+                console.log('SESSION RESTORE: PASS');
+              } else {
+                console.log('SESSION RESTORE: bootstrap');
+              }
+
+              const tokenForRun = restoredSession?.token
+                ? String(restoredSession.token).trim()
+                : BOOTSTRAP_TOKEN;
+
+              if (!tokenForRun) throw new Error('NO_TOKEN_FOR_MAX_LOGIN');
+
+              client = new WebMaxClient({
+                name: SESSION_NAME,
+                token: tokenForRun,
+                deviceType: 'WEB',
+                saveToken: true,
+                clearSessionOnFailedSync: false,
+                sessionBackup: true,
+                debug: false,
+                logIncoming: false,
+                maxReconnectAttempts: 0,
+                reconnectDelay: 1000,
+                timezone: 'Europe/Moscow',
+              });
+
+              await client.start();
+
+              const actualUserId = String(
+                client?.me?.id ?? client?.session?.get?.('userId') ?? 'UNKNOWN'
+              );
+              const actualName =
+                client?.me?.fullname ||
+                client?.me?.firstname ||
+                'UNKNOWN';
+
+              if (actualUserId !== EXPECTED_USER_ID) {
+                throw new Error(
+                  `WRONG_MAX_ACCOUNT expected=${EXPECTED_USER_ID} got=${actualUserId}`
+                );
+              }
+
+              console.log(`MAX LOGIN: PASS account=${actualName} user_id=${actualUserId}`);
+
+              if (!fs.existsSync(SESSION_FILE)) {
+                throw new Error('MAX_SESSION_FILE_NOT_CREATED');
+              }
+
+              // IMPORTANT: persist rotated token + stable deviceId IMMEDIATELY after login,
+              // before chat/history work. This closes the failure mode of V1.
+              let persistentSession = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
+              if (!persistentSession?.token || !persistentSession?.deviceId) {
+                throw new Error('MAX_SESSION_FILE_INCOMPLETE');
+              }
+              await saveState(stateIssue.number, initialCursor, persistentSession);
+              console.log('SESSION CHECKPOINT AFTER LOGIN: PASS');
+
+              const cursor = initialCursor;
+              const cid = TARGET_CHAT_ID;
+              let chatState = cursor.chats[cid];
+              let group = chatState?.group || TARGET_CHAT_NAME_FALLBACK;
+
+              try {
+                const info = await client.getChatInfo([Number(cid)]);
+                const chats = info?.chats || info?.payload?.chats || (Array.isArray(info) ? info : []);
+                const hit = Array.isArray(chats)
+                  ? chats.find(x => String(x?.id) === cid)
+                  : null;
+                if (hit?.title) group = String(hit.title);
+              } catch (e) {
+                console.log(`CHAT INFO WARN: ${e.message}`);
+              }
+
+              const history = await client.getHistory(Number(cid), Date.now(), HISTORY_BACKWARD, 0);
+              if (!Array.isArray(history)) throw new Error('MAX_HISTORY_NOT_ARRAY');
+
+              const ordered = [...history].sort((a, b) => messageTime(a) - messageTime(b));
+
+              if (!chatState?.initialized) {
+                const ids = ordered.map(messageId).filter(Boolean);
+                const maxTime = ordered.reduce((mx, m) => Math.max(mx, messageTime(m)), 0);
+                cursor.chats[cid] = {
+                  initialized: true,
+                  lastTime: maxTime || Date.now(),
+                  seenIds: compactSeen(ids),
+                  group,
+                };
+                cursor.version = 2;
+                cursor.accountId = EXPECTED_USER_ID;
+                cursor.updatedAt = new Date().toISOString();
+                await saveState(stateIssue.number, cursor, persistentSession);
+
+                await gh(`/issues/${feedIssue.number}/comments`, {
+                  method: 'POST',
+                  body: {
+                    body: `@${GH_OWNER}\n\nMAX OBSERVER V2 FINAL — BASELINE PASS. Старые сообщения не отправлены как новые.`,
+                  },
+                });
+
+                console.log(`BASELINE: PASS messages=${ordered.length}`);
+                await closeBlocker();
+                console.log('PHILIPPOV MAX OBSERVER FINAL: PASS');
+                process.exit(0);
+              }
+
+              const seen = new Set(compactSeen(chatState.seenIds));
+              const lastTime = Number(chatState.lastTime || 0);
+              const nextSeen = [...seen];
+              const rows = [];
+              let maxTime = lastTime;
+
+              for (const m of ordered) {
+                const id = messageId(m) ||
+                  `t:${messageTime(m)}:${senderId(m)}:${messageText(m).slice(0, 80)}`;
+                const t = messageTime(m);
+
+                maxTime = Math.max(maxTime, t);
+                if (seen.has(id)) continue;
+
+                // BOUNDARY SAFE v1.1:
+                // seenIds is the authoritative deduplication mechanism.
+                // Never drop an unseen message only because MAX returned a timestamp
+                // older than the previous cursor. This closes the exact-run-boundary
+                // race where a message appears while the scheduled check is running.
+                nextSeen.push(id);
+                if (senderId(m) === EXPECTED_USER_ID) continue;
+
+                rows.push({
+                  group,
+                  chatId: cid,
+                  sender: senderName(m),
+                  senderId: senderId(m),
+                  messageId: id,
+                  time: iso(t),
+                  raw: messageText(m),
+                  parsed: parseObservedMessage(messageText(m)),
+                });
+              }
+
+              cursor.chats[cid] = {
+                initialized: true,
+                lastTime: maxTime,
+                seenIds: compactSeen(nextSeen),
+                group,
+              };
+              cursor.version = 2;
+              cursor.accountId = EXPECTED_USER_ID;
+              cursor.updatedAt = new Date().toISOString();
+
+              // Read the session again in case MAX rotated it during the history request.
+              persistentSession = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
+              await saveState(stateIssue.number, cursor, persistentSession);
+
+              if (rows.length) {
+                const parserCounts = rows.reduce((acc, row) => {
+                  const k = row?.parsed?.kind || 'UNKNOWN';
+                  acc[k] = (acc[k] || 0) + 1;
+                  return acc;
+                }, {});
+                console.log(`REQUEST PARSER BATCH: ${JSON.stringify(parserCounts)}`);
+
+
+              // Safe learning telemetry: only kind/reason counters, never RAW MAX text.
+              const reasonCounts = rows.reduce((acc, row) => {
+                const key = `${row?.parsed?.kind || 'UNKNOWN'}:${row?.parsed?.reason || 'NO_REASON'}`;
+                acc[key] = (acc[key] || 0) + 1;
+                return acc;
+              }, {});
+              console.log(`REQUEST PARSER REASONS: ${JSON.stringify(reasonCounts)}`);
+
+                // Repository is public: never publish RAW MAX text in plaintext.
+                // Persist the whole batch encrypted with the MAX_SESSION-derived AES-256-GCM key.
+                const encryptedFeed = encryptSession(rows, BOOTSTRAP_RAW);
+                await gh(`/issues/${feedIssue.number}/comments`, {
+                  method: 'POST',
+                  body: {
+                    body: [
+                      `@${GH_OWNER}`,
+                      '',
+                      `MAX OBSERVER: ${rows.length} NEW MESSAGE(S) — ENCRYPTED`,
+                      '<!--PHILIPPOV_ENCRYPTED_FEED_V1',
+                      JSON.stringify(encryptedFeed),
+                      'PHILIPPOV_ENCRYPTED_FEED_V1-->',
+                    ].join('\n'),
+                  },
+                });
+                console.log(`OBSERVER CHECK: PASS new_messages=${rows.length}`);
+              } else {
+                console.log('OBSERVER CHECK: PASS new_messages=0');
+              }
+
+              // LIVE OBJECT SOURCE + MATCH DRY
+              const objectChat = await discoverChatByExactTitle(client, OBJECT_CHAT_TITLE);
+              if (!objectChat?.id) throw new Error(`OBJECT_CHAT_NOT_FOUND title=${OBJECT_CHAT_TITLE}`);
+              const objectCid = String(objectChat.id);
+              const objectHistory = await client.getHistory(Number(objectCid), Date.now(), HISTORY_BACKWARD, 0);
+              if (!Array.isArray(objectHistory)) throw new Error('OBJECT_HISTORY_NOT_ARRAY');
+
+              // SAFE OBJECT SOURCE DIAGNOSTIC v1.4.2
+              // No RAW object text, sender names/IDs, message IDs, or exact prices are logged.
+              // Purpose: explain why visible object messages fail parseObjectMessage:
+              // EMPTY_TEXT -> NO_TYPE / NO_PRICE -> ACCEPT.
+              const objectDiagNowMs = Date.now();
+              const objectDiagRows = objectHistory.map((m, index) => {
+                const rawTime = messageTime(m);
+                const t = toMsTimestamp(rawTime);
+                const text = messageText(m).trim();
+                const types = text ? parseObjectTypes(text) : [];
+                const price = text ? parseObjectPrice(text) : null;
+
+                let reason = 'ACCEPT';
+                if (!text) reason = 'EMPTY_TEXT';
+                else if (!types.length && price === null) reason = 'NO_TYPE_AND_PRICE';
+                else if (!types.length) reason = 'NO_TYPE';
+                else if (price === null) reason = 'NO_PRICE';
+
+                return {
+                  index,
+                  time: iso(rawTime),
+                  ageMin: t > 0 ? Math.round((objectDiagNowMs - t) / 60000) : null,
+                  textLen: text.length,
+                  accepted: reason === 'ACCEPT',
+                  reason,
+                  typeCount: types.length,
+                  priceShape: {
+                    rubSymbol: /₽/u.test(text),
+                    rubWord: /руб/iu.test(text),
+                    millionWord: /млн|миллион/iu.test(text),
+                    groupedAmount: /\b\d{1,3}(?:[ \u00A0\u202F]\d{3}){1,2}\b/u.test(text),
+                    compactAmount: /\b\d{6,8}\b/u.test(text),
+                    decimalAmount: /\b\d{1,2}[.,]\d{1,2}\b/u.test(text),
+                  },
+                  typeShape: {
+                    studio: /студ/iu.test(text),
+                    oneRoom: /(?:1\s*[- ]?(?:к|ком)|одноком|однуш)/iu.test(text),
+                    euroTwo: /евро\s*[- ]?2|евродв/iu.test(text),
+                    euroThreePlus: /евро\s*[- ]?[3-6]|евротр[её]ш|еврочетыр/iu.test(text),
+                    twoRoom: /(?:2\s*[- ]?(?:к|ком)|двуш|двухком)/iu.test(text),
+                    threeRoom: /(?:3\s*[- ]?(?:к|ком)|тр[её]ш|трехком|трёхком)/iu.test(text),
+                    fourPlusRoom: /(?:[4-9]\s*(?:[- ]?(?:к|ком)|\s*(?:х\s*)?комнат)|четыр[её]хком|пятиком|шестиком)/iu.test(normalizeText(text)),
+                    apartments: /апартамент|апарт\s*отел/iu.test(text),
+                    roomOnly: /комната|комнату|комнаты/iu.test(text),
+                    parking: /гараж|машино\s*мест|машиномест|паркинг/iu.test(text),
+                    land: /участок|земельн|земля/iu.test(text),
+                    commercial: /офис|склад|коммерц|общепит|нежил/iu.test(text),
+                    house: /(?:^|\s)(?:дом|дача|коттедж)(?:\s|$)|таунхаус|дуплекс/iu.test(normalizeText(text)),
+                    apartmentWord: /квартир/iu.test(text),
+                  },
+                };
+              });
+
+              const objectDiagReasonCounts = objectDiagRows.reduce((acc, row) => {
+                acc[row.reason] = (acc[row.reason] || 0) + 1;
+                return acc;
+              }, {});
+
+              const objectDiag24h = objectDiagRows.filter(row =>
+                row.ageMin !== null &&
+                row.ageMin >= -5 &&
+                row.ageMin <= 24 * 60
+              );
+
+              console.log(`OBJECT PIPELINE DIAG: ${JSON.stringify({
+                historyTotal: objectDiagRows.length,
+                acceptedTotal: objectDiagRows.filter(r => r.accepted).length,
+                rejectedTotal: objectDiagRows.filter(r => !r.accepted).length,
+                reasonCounts: objectDiagReasonCounts,
+                within24hTotal: objectDiag24h.length,
+                within24hAccepted: objectDiag24h.filter(r => r.accepted).length,
+                within24hRejected: objectDiag24h.filter(r => !r.accepted).length,
+              })}`);
+
+              console.log(`OBJECT PIPELINE REJECT ROWS: ${JSON.stringify(
+                objectDiagRows.filter(r => !r.accepted)
+              )}`);
+
+              console.log(`OBJECT PIPELINE LAST 50: ${JSON.stringify(
+                objectDiagRows.slice(-50)
+              )}`);
+
+              // SAFE OBJECT RAW STRUCTURE DIAGNOSTIC v1.4.3
+              // Never logs RAW values, sender IDs/names, message IDs, or exact prices.
+              // Only schema paths, primitive types, string lengths, array lengths,
+              // and object key counts are logged. Suspicious/dynamic object keys are redacted.
+              // Target window covers the fresh 38-message burst seen at ~14:09 MSK.
+              function safePathKey(key) {
+                const s = String(key || '');
+                return /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(s) ? s : '<dynamic-key>';
+              }
+
+              function rawShape(value, path = 'rawData', depth = 0, out = [], seen = new WeakSet()) {
+                if (out.length >= 220) return out;
+
+                if (value === null) {
+                  out.push(`${path}:null`);
+                  return out;
+                }
+
+                const t = typeof value;
+
+                if (t === 'string') {
+                  out.push(`${path}:string(len=${value.length})`);
+                  return out;
+                }
+
+                if (t === 'number' || t === 'boolean' || t === 'bigint') {
+                  out.push(`${path}:${t}`);
+                  return out;
+                }
+
+                if (t !== 'object') {
+                  if (t !== 'undefined' && t !== 'function') out.push(`${path}:${t}`);
+                  return out;
+                }
+
+                if (depth >= 9) {
+                  out.push(`${path}:object(depth-limit)`);
+                  return out;
+                }
+
+                if (seen.has(value)) {
+                  out.push(`${path}:circular`);
+                  return out;
+                }
+                seen.add(value);
+
+                if (Array.isArray(value)) {
+                  out.push(`${path}:array(len=${value.length})`);
+                  for (let i = 0; i < Math.min(value.length, 16) && out.length < 220; i++) {
+                    rawShape(value[i], `${path}[${i}]`, depth + 1, out, seen);
+                  }
+                  return out;
+                }
+
+                const keys = Object.keys(value).sort();
+                out.push(`${path}:object(keys=${keys.length})`);
+                for (const key of keys) {
+                  if (out.length >= 220) break;
+                  rawShape(value[key], `${path}.${safePathKey(key)}`, depth + 1, out, seen);
+                }
+                return out;
+              }
+
+              const objectRawWindowStartMs = Date.parse('2026-09-05T11:09:00.000Z');
+              const objectRawWindowEndMs = Date.parse('2026-09-05T11:09:20.000Z');
+
+              const objectRawTargetRows = objectHistory
+                .map((m, index) => ({
+                  index,
+                  rawTime: messageTime(m),
+                  t: toMsTimestamp(messageTime(m)),
+                  textLen: messageText(m).length,
+                  shape: rawShape(m?.rawData),
+                }))
+                .filter(r => r.t >= objectRawWindowStartMs && r.t <= objectRawWindowEndMs);
+
+              const objectRawShapeGroups = new Map();
+              for (const row of objectRawTargetRows) {
+                const key = JSON.stringify(row.shape);
+                const got = objectRawShapeGroups.get(key) || {
+                  count: 0,
+                  indices: [],
+                  firstTime: null,
+                  lastTime: null,
+                  textLens: new Set(),
+                  shape: row.shape,
+                };
+                got.count += 1;
+                if (got.indices.length < 50) got.indices.push(row.index);
+                const t = iso(row.rawTime);
+                if (!got.firstTime) got.firstTime = t;
+                got.lastTime = t;
+                got.textLens.add(row.textLen);
+                objectRawShapeGroups.set(key, got);
+              }
+
+              const objectRawShapeSummary = [...objectRawShapeGroups.values()].map(g => ({
+                count: g.count,
+                indices: g.indices,
+                firstTime: g.firstTime,
+                lastTime: g.lastTime,
+                textLens: [...g.textLens].sort((a, b) => a - b),
+                shape: g.shape,
+              }));
+
+              console.log(`OBJECT RAW STRUCTURE SUMMARY: ${JSON.stringify({
+                targetRows: objectRawTargetRows.length,
+                uniqueShapeCount: objectRawShapeSummary.length,
+                groups: objectRawShapeSummary,
+              })}`);
+
+              const objects = objectHistory.map(parseObjectMessage).filter(Boolean);
+              console.log(`OBJECT SOURCE: PASS title=${OBJECT_CHAT_TITLE} chat_id=${objectCid} messages=${objectHistory.length} objects=${objects.length}`);
+              const freshObjectDiag = objectDiagRows.filter(r => r.ageMin !== null && r.ageMin >= -5 && r.ageMin <= 180);
+              console.log(`OBJECT CURRENT SUMMARY: ${JSON.stringify({freshRows:freshObjectDiag.length,freshAccepted:freshObjectDiag.filter(r=>r.accepted).length,freshRejected:freshObjectDiag.filter(r=>!r.accepted).length,reasons:freshObjectDiag.reduce((a,r)=>(a[r.reason]=(a[r.reason]||0)+1,a),{})})}`);
+
+              const nowMs = Date.now();
+
+              // SAFE PIPELINE DIAGNOSTIC v1.4.1
+              // No RAW message text, sender IDs, names, or message IDs are logged.
+              // Purpose: localize where a live request disappears:
+              // timestamp -> self-filter -> text extraction -> parser.
+              function valueType(v) {
+                if (Array.isArray(v)) return 'array';
+                if (v === null) return 'null';
+                return typeof v;
+              }
+
+              const pipelineDiagRows = ordered.map((m, index) => {
+                const rawTime = messageTime(m);
+                const t = toMsTimestamp(rawTime);
+                const text = messageText(m);
+                const parsed = parseObservedMessage(text);
+                const ageMin = t > 0 ? Math.round((nowMs - t) / 60000) : null;
+
+                return {
+                  index,
+                  time: iso(rawTime),
+                  ageMin,
+                  self: senderId(m) === EXPECTED_USER_ID,
+                  textLen: text.length,
+                  kind: parsed?.kind || 'UNKNOWN',
+                  reason: parsed?.reason || 'NO_REASON',
+                  mTextType: valueType(m?.text),
+                  rawTextType: valueType(m?.rawData?.text),
+                  rawMessageType: valueType(m?.rawData?.message),
+                  rawBodyType: valueType(m?.rawData?.body),
+                  rawContentType: valueType(m?.rawData?.content),
+                  rawCaptionType: valueType(m?.rawData?.caption),
+                  rawTimestampType: valueType(m?.rawData?.timestamp),
+                  rawTimeType: valueType(m?.rawData?.time),
+                };
+              });
+
+              const diag24h = pipelineDiagRows.filter(r =>
+                !r.self &&
+                r.ageMin !== null &&
+                r.ageMin >= -5 &&
+                r.ageMin <= 24 * 60
+              );
+
+              const diag3h = diag24h.filter(r => r.ageMin <= 180);
+
+              const diagKindCounts = diag24h.reduce((acc, r) => {
+                acc[r.kind] = (acc[r.kind] || 0) + 1;
+                return acc;
+              }, {});
+
+              const diagReasonCounts = diag24h.reduce((acc, r) => {
+                const key = `${r.kind}:${r.reason}`;
+                acc[key] = (acc[key] || 0) + 1;
+                return acc;
+              }, {});
+
+              console.log(`REQUEST PIPELINE DIAG: ${JSON.stringify({
+                historyTotal: pipelineDiagRows.length,
+                otherSenderTotal: pipelineDiagRows.filter(r => !r.self).length,
+                within24hOther: diag24h.length,
+                within24hOtherTextNonEmpty: diag24h.filter(r => r.textLen > 0).length,
+                within24hOtherTextEmpty: diag24h.filter(r => r.textLen === 0).length,
+                within24hOtherRequests: diag24h.filter(r => r.kind === 'REQUEST').length,
+                kindCounts: diagKindCounts,
+                reasonCounts: diagReasonCounts,
+              })}`);
+
+              console.log(`REQUEST PIPELINE ROWS 3H: ${JSON.stringify(diag3h)}`);
+
+              const recentRequests = ordered
+                .filter(m => senderId(m) !== EXPECTED_USER_ID)
+                .filter(m => {
+                  const t = toMsTimestamp(messageTime(m));
+                  return t > 0 && nowMs - t <= REQUEST_LOOKBACK_MS;
+                })
+                .map(m => ({
+                  messageId: messageId(m) || `req:${messageTime(m)}:${senderId(m)}`,
+                  time: iso(messageTime(m)),
+                  sender: senderName(m),
+                  senderId: senderId(m),
+                  raw: messageText(m),
+                  parsed: parseObservedMessage(messageText(m)),
+                }))
+                .filter(x => x.parsed?.kind === 'REQUEST');
+
+              const liveMatches = [];
+              for (const reqRow of recentRequests) {
+                for (const obj of objects) {
+                  const verdict = matchRequestToLiveObject(reqRow.parsed, obj);
+                  if (verdict.match) liveMatches.push({
+                    requestMessageId:reqRow.messageId,
+                    requestTime:reqRow.time,
+                    requestSender:reqRow.sender,
+                    requestSenderId:reqRow.senderId,
+                    request:reqRow.parsed,
+                    objectId:obj.objectId,
+                    objectTime:obj.time,
+                    object:obj,
+                    reasons:verdict.reasons,
+                  });
+                }
+              }
+              console.log(`LIVE MATCH DRY: PASS requests=${recentRequests.length} objects=${objects.length} matches=${liveMatches.length}`);
+
+              if (liveMatches.length) {
+                const matchIssue = await ensureIssue(
+                  MATCH_FEED_TITLE,
+                  `@${GH_OWNER}\n\nPHILIPPOV MAX OBSERVER — MATCH DRY FEED\nRAW DETAILS ARE AES-256-GCM ENCRYPTED`
+                );
+                const encryptedMatches = encryptSession(liveMatches, BOOTSTRAP_RAW);
+                await gh(`/issues/${matchIssue.number}/comments`, {
+                  method:'POST',
+                  body:{body:[
+                    `@${GH_OWNER}`,
+                    '',
+                    `MATCH DRY: ${liveMatches.length} MATCH(ES) — ENCRYPTED`,
+                    '<!--PHILIPPOV_MATCH_DRY_ENC_V1',
+                    JSON.stringify(encryptedMatches),
+                    'PHILIPPOV_MATCH_DRY_ENC_V1-->',
+                  ].join('\n')}
+                });
+              }
+
+              await closeBlocker();
+              console.log('PHILIPPOV MAX OBSERVER FINAL: PASS');
+              process.exit(0);
+            } catch (error) {
+              try { await blocker(error); } catch (e) {
+                console.error(`BLOCKER NOTIFY FAILED: ${e.message}`);
+              }
+                            console.error(`MAX OBSERVER V2 FINAL FAILED: ${error?.message || error}`);
+              process.exit(1);
+            }
+          }
+
+          main().catch(error => {
+            console.error(`MAX OBSERVER V2 FINAL FATAL: ${error?.message || error}`);
+            process.exit(1);
+          });
+          JS
+
+          node --check observer.cjs
+          timeout --signal=TERM --kill-after=5s 70s node observer.cjs
