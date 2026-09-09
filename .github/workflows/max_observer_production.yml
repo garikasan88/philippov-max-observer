@@ -62,7 +62,7 @@ jobs:
           cp "$BASE_OBSERVER" "$ACTIVE_OBSERVER"
 
           # TEMP SAFE DIAGNOSTIC: inspect only schema paths/types/lengths of the
-          # current object-message wrapper. No raw MAX text, IDs, names or prices.
+          # fresh object rawData. No raw MAX text, IDs, names or exact prices.
           python3 - "$ACTIVE_OBSERVER" <<'PY'
           from pathlib import Path
           import sys
@@ -72,7 +72,7 @@ jobs:
           replacements = [
               (
                   "shape: rawShape(m?.rawData),",
-                  "shape: rawShape(m, 'message'),",
+                  "shape: rawShape(m?.rawData, 'rawData'),",
               ),
               (
                   "const objectRawWindowStartMs = Date.parse('2026-09-05T11:09:00.000Z');",
@@ -88,7 +88,7 @@ jobs:
                   raise SystemExit(f"SAFE_DIAG_MARKER_NOT_FOUND: {old}")
               s = s.replace(old, new, 1)
           p.write_text(s, encoding="utf-8")
-          print("CURRENT OBJECT SAFE SCHEMA DIAGNOSTIC: ENABLED")
+          print("CURRENT OBJECT RAWDATA SAFE SCHEMA DIAGNOSTIC: ENABLED")
           PY
 
           python3 - "$BASE_PRODUCTION" "$EXEC_SCRIPT" <<'PY'
