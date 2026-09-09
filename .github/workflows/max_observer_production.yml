@@ -14,7 +14,7 @@ on:
       - '.github/workflows/max_observer_production.yml'
 
 permissions:
-  contents: read
+  contents: write
   issues: write
 
 concurrency:
@@ -39,6 +39,43 @@ jobs:
       - name: Checkout frozen production sources
         uses: actions/checkout@v4
 
+      - name: Patch linked-object text extraction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/observer_base.yml')
+          s = p.read_text(encoding='utf-8')
+          old = '''              textFromValue(m?.rawData?.text) ||
+              textFromValue(m?.rawData?.message) ||'''
+          new = '''              textFromValue(m?.rawData?.text) ||
+              textFromValue(m?.rawData?.link?.message?.text) ||
+              textFromValue(m?.rawData?.message) ||'''
+          if new in s:
+              print('LINKED_OBJECT_TEXT_FIX: ALREADY_PRESENT')
+          else:
+              if s.count(old) != 1:
+                  raise SystemExit(f'LINKED_OBJECT_TEXT_FIX_MARKER_COUNT={s.count(old)}')
+              s = s.replace(old, new, 1)
+              p.write_text(s, encoding='utf-8')
+              print('LINKED_OBJECT_TEXT_FIX: APPLIED')
+          PY
+
+          git diff --check
+          grep -F "textFromValue(m?.rawData?.link?.message?.text) ||" src/observer_base.yml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/observer_base.yml
+          if ! git diff --cached --quiet; then
+            git commit -m "Fix MAX linked-message text extraction"
+            git push origin HEAD:main
+          else
+            echo "LINKED_OBJECT_TEXT_FIX: NO_COMMIT_NEEDED"
+          fi
+
       - name: Node 24
         uses: actions/setup-node@v7
         with:
@@ -57,39 +94,7 @@ jobs:
           test -s "$BASE_OBSERVER"
           test -s "$BASE_PRODUCTION"
 
-          # The legacy dispatcher now occupies observer.yml. Production uses the
-          # frozen, last-known production source only inside this ephemeral runner.
           cp "$BASE_OBSERVER" "$ACTIVE_OBSERVER"
-
-          # TEMP SAFE DIAGNOSTIC: inspect only schema paths/types/lengths of the
-          # fresh object rawData. No raw MAX text, IDs, names or exact prices.
-          python3 - "$ACTIVE_OBSERVER" <<'PY'
-          from pathlib import Path
-          import sys
-
-          p = Path(sys.argv[1])
-          s = p.read_text(encoding="utf-8")
-          replacements = [
-              (
-                  "shape: rawShape(m?.rawData),",
-                  "shape: rawShape(m?.rawData, 'rawData'),",
-              ),
-              (
-                  "const objectRawWindowStartMs = Date.parse('2026-09-05T11:09:00.000Z');",
-                  "const objectRawWindowStartMs = Date.now() - 3 * 60 * 60 * 1000;",
-              ),
-              (
-                  "const objectRawWindowEndMs = Date.parse('2026-09-05T11:09:20.000Z');",
-                  "const objectRawWindowEndMs = Date.now() + 5 * 60 * 1000;",
-              ),
-          ]
-          for old, new in replacements:
-              if old not in s:
-                  raise SystemExit(f"SAFE_DIAG_MARKER_NOT_FOUND: {old}")
-              s = s.replace(old, new, 1)
-          p.write_text(s, encoding="utf-8")
-          print("CURRENT OBJECT RAWDATA SAFE SCHEMA DIAGNOSTIC: ENABLED")
-          PY
 
           python3 - "$BASE_PRODUCTION" "$EXEC_SCRIPT" <<'PY'
           from pathlib import Path
