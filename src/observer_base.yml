@@ -257,6 +257,7 @@ jobs:
             return (
               textFromValue(m?.text) ||
               textFromValue(m?.rawData?.text) ||
+              textFromValue(m?.rawData?.link?.message?.text) ||
               textFromValue(m?.rawData?.message) ||
               textFromValue(m?.rawData)
             );
