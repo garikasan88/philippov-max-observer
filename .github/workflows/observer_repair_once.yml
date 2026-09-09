@@ -31,10 +31,9 @@ jobs:
           if marker in s:
               print('OBJECT_PRICE_MONEY_MARKER_FIX: ALREADY_PRESENT')
           else:
-              if s.count(anchor) != 2:
+              if s.count(anchor) != 1:
                   raise SystemExit(f'OBJECT_PRICE_ANCHOR_COUNT={s.count(anchor)}')
-              # The second occurrence belongs to parseObjectPrice; insert immediately before it.
-              pos = s.rfind(anchor)
+              pos = s.index(anchor)
               line_start = s.rfind('\n', 0, pos) + 1
               indent = s[line_start:pos]
               block = (
