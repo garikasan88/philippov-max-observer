@@ -8,13 +8,9 @@ on:
         required: false
         default: false
         type: boolean
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/max_observer_production.yml'
 
 permissions:
-  contents: write
+  contents: read
   issues: write
 
 concurrency:
@@ -39,44 +35,6 @@ jobs:
       - name: Checkout frozen production sources
         uses: actions/checkout@v4
 
-      - name: Patch linked-object text extraction
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path('src/observer_base.yml')
-          s = p.read_text(encoding='utf-8')
-          needle = "textFromValue(m?.rawData?.text) ||"
-          added = "textFromValue(m?.rawData?.link?.message?.text) ||"
-          if added in s:
-              print('LINKED_OBJECT_TEXT_FIX: ALREADY_PRESENT')
-          else:
-              if s.count(needle) != 1:
-                  raise SystemExit(f'LINKED_OBJECT_TEXT_FIX_MARKER_COUNT={s.count(needle)}')
-              pos = s.index(needle)
-              line_start = s.rfind('\n', 0, pos) + 1
-              indent = s[line_start:pos]
-              replacement = needle + '\n' + indent + added
-              s = s.replace(needle, replacement, 1)
-              p.write_text(s, encoding='utf-8')
-              print('LINKED_OBJECT_TEXT_FIX: APPLIED')
-          PY
-
-          git diff --check
-          grep -F "textFromValue(m?.rawData?.link?.message?.text) ||" src/observer_base.yml
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/observer_base.yml
-          if ! git diff --cached --quiet; then
-            git commit -m "Fix MAX linked-message text extraction"
-            git push origin HEAD:main
-          else
-            echo "LINKED_OBJECT_TEXT_FIX: NO_COMMIT_NEEDED"
-          fi
-
       - name: Node 24
         uses: actions/setup-node@v7
         with:
@@ -95,6 +53,8 @@ jobs:
           test -s "$BASE_OBSERVER"
           test -s "$BASE_PRODUCTION"
 
+          # The legacy dispatcher now occupies observer.yml. Production uses the
+          # frozen, last-known production source only inside this ephemeral runner.
           cp "$BASE_OBSERVER" "$ACTIVE_OBSERVER"
 
           python3 - "$BASE_PRODUCTION" "$EXEC_SCRIPT" <<'PY'
