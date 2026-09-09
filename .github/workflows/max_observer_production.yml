@@ -48,17 +48,18 @@ jobs:
 
           p = Path('src/observer_base.yml')
           s = p.read_text(encoding='utf-8')
-          old = '''              textFromValue(m?.rawData?.text) ||
-              textFromValue(m?.rawData?.message) ||'''
-          new = '''              textFromValue(m?.rawData?.text) ||
-              textFromValue(m?.rawData?.link?.message?.text) ||
-              textFromValue(m?.rawData?.message) ||'''
-          if new in s:
+          needle = "textFromValue(m?.rawData?.text) ||"
+          added = "textFromValue(m?.rawData?.link?.message?.text) ||"
+          if added in s:
               print('LINKED_OBJECT_TEXT_FIX: ALREADY_PRESENT')
           else:
-              if s.count(old) != 1:
-                  raise SystemExit(f'LINKED_OBJECT_TEXT_FIX_MARKER_COUNT={s.count(old)}')
-              s = s.replace(old, new, 1)
+              if s.count(needle) != 1:
+                  raise SystemExit(f'LINKED_OBJECT_TEXT_FIX_MARKER_COUNT={s.count(needle)}')
+              pos = s.index(needle)
+              line_start = s.rfind('\n', 0, pos) + 1
+              indent = s[line_start:pos]
+              replacement = needle + '\n' + indent + added
+              s = s.replace(needle, replacement, 1)
               p.write_text(s, encoding='utf-8')
               print('LINKED_OBJECT_TEXT_FIX: APPLIED')
           PY
