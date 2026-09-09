@@ -8,6 +8,10 @@ on:
         required: false
         default: false
         type: boolean
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/max_observer_production.yml'
 
 permissions:
   contents: read
@@ -56,6 +60,36 @@ jobs:
           # The legacy dispatcher now occupies observer.yml. Production uses the
           # frozen, last-known production source only inside this ephemeral runner.
           cp "$BASE_OBSERVER" "$ACTIVE_OBSERVER"
+
+          # TEMP SAFE DIAGNOSTIC: inspect only schema paths/types/lengths of the
+          # current object-message wrapper. No raw MAX text, IDs, names or prices.
+          python3 - "$ACTIVE_OBSERVER" <<'PY'
+          from pathlib import Path
+          import sys
+
+          p = Path(sys.argv[1])
+          s = p.read_text(encoding="utf-8")
+          replacements = [
+              (
+                  "shape: rawShape(m?.rawData),",
+                  "shape: rawShape(m, 'message'),",
+              ),
+              (
+                  "const objectRawWindowStartMs = Date.parse('2026-09-05T11:09:00.000Z');",
+                  "const objectRawWindowStartMs = Date.now() - 3 * 60 * 60 * 1000;",
+              ),
+              (
+                  "const objectRawWindowEndMs = Date.parse('2026-09-05T11:09:20.000Z');",
+                  "const objectRawWindowEndMs = Date.now() + 5 * 60 * 1000;",
+              ),
+          ]
+          for old, new in replacements:
+              if old not in s:
+                  raise SystemExit(f"SAFE_DIAG_MARKER_NOT_FOUND: {old}")
+              s = s.replace(old, new, 1)
+          p.write_text(s, encoding="utf-8")
+          print("CURRENT OBJECT SAFE SCHEMA DIAGNOSTIC: ENABLED")
+          PY
 
           python3 - "$BASE_PRODUCTION" "$EXEC_SCRIPT" <<'PY'
           from pathlib import Path
