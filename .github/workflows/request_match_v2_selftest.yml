@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/request_match_v2_selftest.yml'
       - 'src/request_match_v2_patch.js'
+      - 'src/request_match_v2_hotfix.js'
 
 permissions:
   contents: read
@@ -39,6 +40,7 @@ jobs:
 
           src = Path('src/observer_base.yml').read_text(encoding='utf-8')
           patch = Path('src/request_match_v2_patch.js').read_text(encoding='utf-8')
+          hotfix = Path('src/request_match_v2_hotfix.js').read_text(encoding='utf-8')
           start_marker = "cat > observer.cjs <<'JS'\n"
           end_marker = "\n          JS\n"
           if start_marker not in src or end_marker not in src:
@@ -51,7 +53,7 @@ jobs:
           main_marker = "\n          async function main() {"
           if main_marker not in js:
               raise SystemExit('MAIN_INSERT_POINT_NOT_FOUND')
-          js = js.replace(main_marker, "\n" + patch + "\n" + main_marker, 1)
+          js = js.replace(main_marker, "\n" + patch + "\n" + hotfix + "\n" + main_marker, 1)
 
           invoke_marker = "\n          main().catch(error => {"
           invoke = js.rfind(invoke_marker)
