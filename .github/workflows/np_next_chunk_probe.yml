@@ -13,44 +13,70 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - name: Inspect public Next chunks
+      - name: Extract category RPC methods
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/npchunks && cd /tmp/npchunks
-          for u in \
-            'https://app.neprostobot.ru/_next/static/chunks/0og-vp.lhzrrv.js' \
-            'https://app.neprostobot.ru/_next/static/chunks/0vv3ducgxa3.~.js' \
-            'https://app.neprostobot.ru/_next/static/chunks/0wyxdmhuni9cw.js' \
-            'https://app.neprostobot.ru/_next/static/chunks/0_hufvg.88~_-.js'; do
-            f=$(basename "$u")
-            curl -L --max-time 30 -A 'Mozilla/5.0' -sS "$u" -o "$f" || true
-            echo "FILE $f BYTES $(wc -c < "$f" 2>/dev/null || echo 0)"
-          done
+          cd /tmp
+          curl -L --max-time 30 -A 'Mozilla/5.0' -sS 'https://app.neprostobot.ru/_next/static/chunks/0og-vp.lhzrrv.js' -o np.js
           python3 - <<'PY'
           from pathlib import Path
           import re
-          files=list(Path('.').glob('*.js'))
-          needles=['Разложить по категориям','Перераспределить все группы','Группы без категории','Проверьте результат','Распределить','category','categories','categorize','autoCategor','rpc/','method_name','group','preview','suggest','classif','distribution']
-          for p in files:
-              t=p.read_text('utf-8',errors='ignore')
-              print('\n###',p.name,'###')
-              low=t.lower()
-              hits=[]
-              for needle in needles:
-                  start=0
-                  while True:
-                      pos=low.find(needle.lower(),start)
-                      if pos<0: break
-                      hits.append((pos,needle)); start=pos+1
-              seen=set()
-              for pos,needle in sorted(hits)[:120]:
-                  a=max(0,pos-700); b=min(len(t),pos+1500)
-                  ctx=re.sub(r'\s+',' ',t[a:b])
-                  # redact obvious long tokens/credentials while preserving code strings
-                  ctx=re.sub(r'(?i)(authorization|token|cookie|secret)(.{0,8})[A-Za-z0-9._~-]{40,}',r'\1\2[redacted]',ctx)
-                  sig=(needle,ctx[:240])
-                  if sig in seen: continue
-                  seen.add(sig)
-                  print('\nHIT',needle,'POS',pos,'\n',ctx[:2200])
+          t=Path('/tmp/np.js').read_text('utf-8',errors='ignore')
+          print('BYTES',len(t))
+
+          def ctx(label, needle, before=1800, after=3200, max_hits=12):
+              low=t.lower(); q=needle.lower(); start=0; count=0
+              while count<max_hits:
+                  pos=low.find(q,start)
+                  if pos<0: break
+                  a=max(0,pos-before); b=min(len(t),pos+after)
+                  s=re.sub(r'\s+',' ',t[a:b])
+                  s=re.sub(r'(?i)(authorization|cookie|secret|token)(.{0,8})[A-Za-z0-9._~-]{40,}',r'\1\2[redacted]',s)
+                  print(f'\n=== {label} HIT {count+1} POS {pos} ===\n{s}')
+                  start=pos+len(q); count+=1
+              print(f'COUNT {label} {count}')
+
+          # Exact UI phrases and handler names around the feature.
+          for label,needle in [
+              ('AUTO_HANDLER','onAutoCategorize'),
+              ('AUTO_WORD','autoCategorize'),
+              ('DIALOG_TITLE','Разложить по категориям'),
+              ('UNCATEGORIZED','Группы без категории'),
+              ('CHECK_RESULT','Проверьте результат'),
+              ('REDISTRIBUTE','Перераспределить все группы'),
+              ('DISTRIBUTE_BUTTON','Распределить'),
+              ('SET_GROUP_CATEGORIES','setGroupCategories'),
+              ('MOVE_GROUPS','moveGroups'),
+              ('ADD_CATEGORY','addCategory'),
+              ('DELETE_CATEGORY','deleteCategory'),
+          ]:
+              ctx(label,needle)
+
+          # Extract literal method names passed through the tenant RPC helper nh(..., "method", ...).
+          methods=[]
+          for m in re.finditer(r'nh\([^,]{1,120},\s*["\']([^"\']+)["\']\s*,',t):
+              name=m.group(1)
+              if name not in methods: methods.append(name)
+          print('\n=== RPC_LITERAL_METHODS ===')
+          for name in methods:
+              if any(k in name.lower() for k in ['group','categor','sync','max','telegram','broadcast','advert','stat']):
+                  print(name)
+
+          # Extract all quoted identifier-like strings mentioning categorize/category to catch indirect dispatch maps.
+          vals=[]
+          for m in re.finditer(r'["\']([A-Za-z][A-Za-z0-9_]{2,80})["\']',t):
+              v=m.group(1)
+              if ('categor' in v.lower() or 'group' in v.lower()) and v not in vals:
+                  vals.append(v)
+          print('\n=== CATEGORY_GROUP_IDENTIFIERS ===')
+          for v in vals: print(v)
+
+          # Helper definition / endpoint builder.
+          for pat in [r'function\s+nh\s*\(', r'\bnh\s*=\s*async', r'\bnh\s*=\s*\(']:
+              m=re.search(pat,t)
+              if m:
+                  pos=m.start(); s=re.sub(r'\s+',' ',t[max(0,pos-1200):min(len(t),pos+3500)])
+                  print('\n=== NH_DEFINITION ===\n',s)
+                  break
           PY
