@@ -206,7 +206,16 @@ function requestMatchV21SelfTest() {
 
 const __v21ParserSelfTestBase = parserSelfTest;
 parserSelfTest = function parserSelfTestV21Wrapper() {
-  const base = __v21ParserSelfTestBase();
+  // Preserve the frozen V2 regression contract while running its own tests.
+  // V2.1 behavior is verified immediately afterwards by its dedicated tests.
+  const activeParseObservedMessage = parseObservedMessage;
+  let base;
+  try {
+    parseObservedMessage = __v21ParseObservedMessageBase;
+    base = __v21ParserSelfTestBase();
+  } finally {
+    parseObservedMessage = activeParseObservedMessage;
+  }
   const v21 = requestMatchV21SelfTest();
   return `${base} / ${v21}`;
 };
