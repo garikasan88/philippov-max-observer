@@ -28,7 +28,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       GH_OWNER: ${{ github.repository_owner }}
-      GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      GH_RUN_URL: ${{ github.server_url }}/${{ github.run_id }}
       PHILIPPOV_SMOKE_REQUEST: ${{ inputs.smoke }}
 
     steps:
@@ -47,22 +47,33 @@ jobs:
 
           BASE_OBSERVER="$GITHUB_WORKSPACE/src/observer_base.yml"
           BASE_PRODUCTION="$GITHUB_WORKSPACE/src/max_observer_production_base.yml"
+          NEXT_ACTION_OVERLAY="$GITHUB_WORKSPACE/src/next_action_lifecycle_overlay.py"
           ACTIVE_OBSERVER="$GITHUB_WORKSPACE/.github/workflows/observer.yml"
           EXEC_SCRIPT="$RUNNER_TEMP/philippov_production_sensor.sh"
 
           test -s "$BASE_OBSERVER"
           test -s "$BASE_PRODUCTION"
+          test -s "$NEXT_ACTION_OVERLAY"
 
           # The legacy dispatcher now occupies observer.yml. Production uses the
           # frozen, last-known production source only inside this ephemeral runner.
           cp "$BASE_OBSERVER" "$ACTIVE_OBSERVER"
 
-          python3 - "$BASE_PRODUCTION" "$EXEC_SCRIPT" <<'PY'
+          python3 - "$BASE_PRODUCTION" "$EXEC_SCRIPT" "$NEXT_ACTION_OVERLAY" <<'PY'
           from pathlib import Path
           import sys
 
           src = Path(sys.argv[1]).read_text(encoding="utf-8")
           out = Path(sys.argv[2])
+          overlay_path = Path(sys.argv[3])
+
+          overlay_ns = {}
+          exec(compile(overlay_path.read_text(encoding="utf-8"), str(overlay_path), "exec"), overlay_ns)
+          apply_overlay = overlay_ns.get("apply_next_action_lifecycle_overlay")
+          if not callable(apply_overlay):
+              raise SystemExit("NEXT_ACTION_OVERLAY_FUNCTION_MISSING")
+          src = apply_overlay(src)
+          print("NEXT ACTION LIFECYCLE OVERLAY: READY")
 
           marker = (
               "      - name: Build production SENSOR variants\n"
