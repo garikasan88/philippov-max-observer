@@ -24,7 +24,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       GH_OWNER: ${{ github.repository_owner }}
-      GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      GH_RUN_URL: ${{ github.server_url }}/${{ github.run_id }}
 
     steps:
       - name: Checkout current PASS observer
@@ -180,6 +180,19 @@ jobs:
                   const subrequestLine = matchView.isMulti && matchView.index
                     ? `Подзапрос: ${matchView.index} из ${matchView.total || '?'}`
                     : null;
+                  const requestAuthor = String(m.requestSender || '').trim();
+                  const matchKey = `${cid}|${m.requestMessageId}|${m.objectId}`;
+                  const nextAction = {
+                    kind: 'NEXT_ACTION',
+                    code: 'VERIFY_OBJECT_AND_CONTACT_REQUEST_AUTHOR',
+                    status: 'OPEN',
+                    priority: 'HIGH',
+                    sourceMatchKey: matchKey,
+                    text: requestAuthor
+                      ? `Проверить актуальность объекта → связаться с ${requestAuthor} и предложить этот объект.`
+                      : 'Проверить актуальность объекта → связаться с автором запроса и предложить этот объект.',
+                  };
+                  m.nextAction = nextAction;
 
                   const notifyText = [
                     'PHILIPPOV MATCH V2',
@@ -198,6 +211,10 @@ jobs:
                     `Цена объекта: ${rub(obj.price)}`,
                     `Площадь: ${obj.area ?? 'НЕ УСТАНОВЛЕНО'}`,
                     `Совпало по: ${humanReasons.length ? humanReasons.join(', ') : 'MATCH_V2'}`,
+                    '',
+                    'СЛЕДУЮЩЕЕ ДЕЙСТВИЕ:',
+                    nextAction.text,
+                    `Статус: ${nextAction.status}`,
                   ].join('\n');
 
                   await client.sendMessage({
@@ -207,9 +224,10 @@ jobs:
 
                   // Keep the historical dedup key stable: changing its shape would
                   // make remembered matches look new and could resend old notifications.
-                  const key = `${cid}|${m.requestMessageId}|${m.objectId}`;
+                  const key = matchKey;
                   notifiedKeys.add(key);
                   console.log(`MATCH NOTIFY: PASS key=${key}`);
+                  console.log(`NEXT ACTION: OPEN code=${nextAction.code} key=${nextAction.sourceMatchKey}`);
                 }
 
                 cursor.notifiedMatchKeys = [...notifiedKeys].slice(-MAX_NOTIFIED_MATCH_KEYS);
