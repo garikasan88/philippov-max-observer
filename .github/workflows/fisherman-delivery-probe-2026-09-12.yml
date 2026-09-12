@@ -64,16 +64,11 @@ jobs:
                   raise SystemExit('PROBE_PATCH_MARKER_MISSING: ' + old)
               js = js.replace(old, new, 1)
 
-          needle = """              const history = await client.getHistory(Number(cid), Date.now(), HISTORY_BACKWARD, 0);
-              if (!Array.isArray(history)) throw new Error('MAX_HISTORY_NOT_ARRAY');
+          marker = "const ordered = [...history].sort((a, b) => messageTime(a) - messageTime(b));"
+          if marker not in js:
+              raise SystemExit('PROBE_ORDERED_MARKER_NOT_FOUND')
 
-              const ordered = [...history].sort((a, b) => messageTime(a) - messageTime(b));"""
-          if needle not in js:
-              raise SystemExit('PROBE_HISTORY_INSERT_POINT_NOT_FOUND')
-
-          injected = """              const history = await client.getHistory(Number(cid), Date.now(), HISTORY_BACKWARD, 0);
-              if (!Array.isArray(history)) throw new Error('MAX_HISTORY_NOT_ARRAY');
-
+          probe = r'''
               const probeStart = Date.parse('2026-09-12T09:11:30Z');
               const probeEnd = Date.parse('2026-09-12T09:14:30Z');
               const toMs = value => {
@@ -99,9 +94,8 @@ jobs:
                     ? 'DELIVERY VERDICT: ABSENT_IN_READABLE_WINDOW'
                     : 'DELIVERY VERDICT: INCONCLUSIVE_EMPTY_WINDOW'));
               process.exit(0);
-
-              const ordered = [...history].sort((a, b) => messageTime(a) - messageTime(b));"""
-          js = js.replace(needle, injected, 1)
+          '''
+          js = js.replace(marker, probe + "\n              " + marker, 1)
           out.write_text(js, encoding='utf-8')
           print('FROZEN OBSERVER PROBE BUILD: PASS')
           PY
