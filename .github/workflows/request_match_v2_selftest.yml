@@ -66,8 +66,8 @@ jobs:
               "console.log('REQUEST MATCH V2 ONE-SHOT: PASS');",
           ]) + "\n"
 
-          Path('/tmp/request_match_v2_selftest.cjs').write_text(js, encoding='utf-8')
+          Path('.request_match_v2_selftest.cjs').write_text(js, encoding='utf-8')
           PY
 
-          node --check /tmp/request_match_v2_selftest.cjs
-          node /tmp/request_match_v2_selftest.cjs
+          node --check .request_match_v2_selftest.cjs
+          node .request_match_v2_selftest.cjs
