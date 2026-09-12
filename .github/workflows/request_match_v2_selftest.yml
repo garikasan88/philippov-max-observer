@@ -4,9 +4,11 @@ on:
   push:
     paths:
       - '.github/workflows/request_match_v2_selftest.yml'
+      - '.github/workflows/max_observer_production.yml'
       - 'src/request_match_v2_patch.js'
       - 'src/request_match_v2_hotfix.js'
       - 'src/max_observer_production_base.yml'
+      - 'src/next_action_lifecycle_overlay.py'
 
 permissions:
   contents: read
@@ -74,6 +76,7 @@ jobs:
               "  parseObservedMessage = __activeParseObservedMessageForFrozenV2;",
               "}",
               "console.log('REQUEST MATCH V2.1: ' + requestMatchV21SelfTest());",
+              "console.log('NEXT ACTION LIFECYCLE: ' + nextActionLifecycleSelfTest());",
               "console.log('REQUEST MATCH V2/V2.1 ONE-SHOT: PASS');",
           ]
           js = js[:invoke] + "\n" + "\n".join(selftest_lines) + "\n"
@@ -88,24 +91,45 @@ jobs:
           from pathlib import Path
 
           prod = Path('src/max_observer_production_base.yml').read_text(encoding='utf-8')
+          overlay_path = Path('src/next_action_lifecycle_overlay.py')
+          ns = {}
+          exec(compile(overlay_path.read_text(encoding='utf-8'), str(overlay_path), 'exec'), ns)
+          apply_overlay = ns.get('apply_next_action_lifecycle_overlay')
+          if not callable(apply_overlay):
+              raise SystemExit('NEXT_ACTION_OVERLAY_FUNCTION_MISSING')
+          effective = apply_overlay(prod)
+
           required = [
               "const matchView = v21MatchedRequestView(m.request || {}, m.reasons || []);",
               "`Подзапрос: ${matchView.index} из ${matchView.total || '?'}`",
               "clip(matchView.raw || req.raw, 850)",
               "m.reasons.filter(x => !/^SUBREQUEST:\\d+$/u.test(String(x || '').trim()))",
               "const matchKey = `${cid}|${m.requestMessageId}|${m.objectId}`;",
-              "code: 'VERIFY_OBJECT_AND_CONTACT_REQUEST_AUTHOR'",
-              "status: 'OPEN'",
-              "priority: 'HIGH'",
-              "m.nextAction = nextAction;",
-              "'СЛЕДУЮЩЕЕ ДЕЙСТВИЕ:'",
-              "nextAction.text",
+              "nextActionCreate({sourceMatchKey: matchKey, requestAuthor})",
+              "cursor.nextActions[nextAction.id] = nextAction",
+              "cursor.nextActionEvents.push({type:'CREATED'",
+              "nextActionParseCommand(controlText)",
+              "nextActionApplyCommand(cursor.nextActions, controlText",
+              "cursor.nextActionEvents.push({type:'STATUS_CHANGED'",
+              "`ID: ${nextAction.id}`",
               "`Статус: ${nextAction.status}`",
+              "`Управление: СКАУТ ${nextAction.id} В РАБОТУ / ГОТОВО / ОТКЛОНИТЬ`",
               "const encryptedMatches = encryptSession(notifyMatches, BOOTSTRAP_RAW);",
               "const key = matchKey;",
           ]
-          missing = [needle for needle in required if needle not in prod]
+          missing = [needle for needle in required if needle not in effective]
           if missing:
-              raise SystemExit('PRODUCTION_NEXT_ACTION_WIRING_MISSING: ' + repr(missing))
-          print('PRODUCTION MATCH VIEW + NEXT ACTION WIRING: PASS')
+              raise SystemExit('PRODUCTION_NEXT_ACTION_LIFECYCLE_WIRING_MISSING: ' + repr(missing))
+
+          active = Path('.github/workflows/max_observer_production.yml').read_text(encoding='utf-8')
+          active_required = [
+              'src/next_action_lifecycle_overlay.py',
+              'apply_next_action_lifecycle_overlay',
+              'NEXT ACTION LIFECYCLE OVERLAY: READY',
+          ]
+          missing_active = [needle for needle in active_required if needle not in active]
+          if missing_active:
+              raise SystemExit('ACTIVE_PRODUCTION_OVERLAY_WIRING_MISSING: ' + repr(missing_active))
+
+          print('PRODUCTION MATCH VIEW + NEXT ACTION LIFECYCLE WIRING: PASS')
           PY
