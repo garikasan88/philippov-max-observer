@@ -1,0 +1,93 @@
+name: PHILIPPOV REQUEST MATCH V2 — ONE-TIME PRODUCTION CHECK
+
+on:
+  push:
+    paths:
+      - '.github/workflows/request_match_v2_production_run_once.yml'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: philippov-max-observer-production-sensor
+  cancel-in-progress: false
+
+jobs:
+  observer:
+    name: V2 production → 2 groups → MATCH → notify
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    env:
+      MAX_BOOTSTRAP_SECRET: ${{ secrets.MAX_SESSION }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      GH_OWNER: ${{ github.repository_owner }}
+      GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      PHILIPPOV_SMOKE_REQUEST: 'true'
+
+    steps:
+      - name: Checkout current production sources
+        uses: actions/checkout@v4
+
+      - name: Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Run Request MATCH V2 production logic
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE_OBSERVER="$GITHUB_WORKSPACE/src/observer_base.yml"
+          BASE_PRODUCTION="$GITHUB_WORKSPACE/src/max_observer_production_base.yml"
+          ACTIVE_OBSERVER="$GITHUB_WORKSPACE/.github/workflows/observer.yml"
+          EXEC_SCRIPT="$RUNNER_TEMP/philippov_production_sensor.sh"
+
+          test -s "$BASE_OBSERVER"
+          test -s "$BASE_PRODUCTION"
+          test -s "$GITHUB_WORKSPACE/src/request_match_v2_patch.js"
+          test -s "$GITHUB_WORKSPACE/src/request_match_v2_hotfix.js"
+
+          cp "$BASE_OBSERVER" "$ACTIVE_OBSERVER"
+
+          python3 - "$BASE_PRODUCTION" "$EXEC_SCRIPT" <<'PY'
+          from pathlib import Path
+          import sys
+
+          src = Path(sys.argv[1]).read_text(encoding='utf-8')
+          out = Path(sys.argv[2])
+
+          marker = (
+              '      - name: Build production SENSOR variants\n'
+              '        shell: bash\n'
+              '        run: |\n'
+          )
+          if marker not in src:
+              raise SystemExit('FROZEN_PRODUCTION_RUN_BLOCK_NOT_FOUND')
+
+          block = src.split(marker, 1)[1]
+          lines = []
+          for line in block.splitlines():
+              if line.startswith('          '):
+                  lines.append(line[10:])
+              elif line == '':
+                  lines.append('')
+              else:
+                  break
+
+          script = '\n'.join(lines).rstrip() + '\n'
+          event_expr = '$' + '{{ github.event_name }}'
+          old = f'if [[ "{event_expr}" == "workflow_dispatch" ]]; then'
+          new = 'if [[ "${PHILIPPOV_SMOKE_REQUEST:-false}" == "true" ]]; then'
+          if old not in script:
+              raise SystemExit('FROZEN_PRODUCTION_SMOKE_MARKER_NOT_FOUND')
+          script = script.replace(old, new, 1)
+
+          out.write_text(script, encoding='utf-8')
+          print('V2 ONE-TIME PRODUCTION SCRIPT: READY')
+          PY
+
+          bash "$EXEC_SCRIPT"
