@@ -47,13 +47,17 @@ jobs:
           npm init -y >/dev/null 2>&1
           npm install --silent --ignore-scripts --omit=optional --no-audit --no-fund webmaxsocket@1.2.7
 
-          python3 - "$SRC" "$WORKDIR" <<'PY'
+          python3 - "$SRC" "$WORKDIR" "$GITHUB_WORKSPACE/src/request_match_v2_patch.js" "$GITHUB_WORKSPACE/src/request_match_v2_hotfix.js" <<'PY'
           from pathlib import Path
           import sys
 
           src_path = Path(sys.argv[1])
           out_dir = Path(sys.argv[2])
+          patch_path = Path(sys.argv[3])
+          hotfix_path = Path(sys.argv[4])
           src = src_path.read_text(encoding="utf-8")
+          patch = patch_path.read_text(encoding="utf-8")
+          hotfix = hotfix_path.read_text(encoding="utf-8")
 
           marker_start = "cat > observer.cjs <<'JS'\n"
           marker_end = "\n          JS\n"
@@ -64,6 +68,20 @@ jobs:
           start = src.index(marker_start) + len(marker_start)
           end = src.index(marker_end, start)
           base = src[start:end]
+
+          # Activate high-precision Request/MATCH V2 ephemerally in production.
+          main_marker = "\n          async function main() {"
+          if main_marker not in base:
+              raise SystemExit("V2_MAIN_INSERT_POINT_NOT_FOUND")
+          base = base.replace(main_marker, "\n" + patch + "\n" + hotfix + "\n" + main_marker, 1)
+
+          # Stable source ID was confirmed in successful production. Title discovery
+          # only scans getChats(200,0) and became unreliable after mass group joins.
+          old_object_block = """              const objectChat = await discoverChatByExactTitle(client, OBJECT_CHAT_TITLE);\n              if (!objectChat?.id) throw new Error(`OBJECT_CHAT_NOT_FOUND title=${OBJECT_CHAT_TITLE}`);\n              const objectCid = String(objectChat.id);\n              const objectHistory = await client.getHistory(Number(objectCid), Date.now(), HISTORY_BACKWARD, 0);"""
+          new_object_block = """              const objectCid = '-75607874388089';\n              console.log(`OBJECT SOURCE RESOLVE: STABLE_ID chat_id=${objectCid}`);\n              const objectHistory = await client.getHistory(Number(objectCid), Date.now(), HISTORY_BACKWARD, 0);"""
+          if old_object_block not in base:
+              raise SystemExit("OBJECT_SOURCE_BLOCK_NOT_FOUND")
+          base = base.replace(old_object_block, new_object_block, 1)
 
           old_uid = "const EXPECTED_USER_ID = '402668979';"
           old_cid = "const TARGET_CHAT_ID = '-78471339098233';"
@@ -104,7 +122,7 @@ jobs:
               "                    'PHILIPPOV OBSERVER',\n"
               "                    'CONTROL TEST: PASS',\n"
               "                    'SENSOR: Светлана',\n"
-              "                    'Режим: 2 группы → parser → 38 объектов → MATCH → DEDUP → личное уведомление',\n"
+              "                    'Режим: REQUEST/MATCH V2 → 2 группы → 35 объектов → hard constraints → DEDUP → уведомление',\n"
               "                  ].join('\\n'),\n"
               "                });\n"
               "                console.log('NOTIFY SMOKE: PASS chat_id=' + NOTIFY_CHAT_ID);\n"
@@ -157,7 +175,7 @@ jobs:
                   const obj = m.object || {};
 
                   const notifyText = [
-                    'PHILIPPOV MATCH',
+                    'PHILIPPOV MATCH V2',
                     '',
                     `Группа: ${group}`,
                     `Запрос от: ${m.requestSender || 'НЕ УСТАНОВЛЕНО'}`,
@@ -171,7 +189,7 @@ jobs:
                     '',
                     `Цена объекта: ${rub(obj.price)}`,
                     `Площадь: ${obj.area ?? 'НЕ УСТАНОВЛЕНО'}`,
-                    `Совпало по: ${Array.isArray(m.reasons) && m.reasons.length ? m.reasons.join(', ') : 'MATCH'}`,
+                    `Совпало по: ${Array.isArray(m.reasons) && m.reasons.length ? m.reasons.join(', ') : 'MATCH_V2'}`,
                   ].join('\n');
 
                   await client.sendMessage({
@@ -207,7 +225,7 @@ jobs:
               raise SystemExit("MATCH_FEED_COUNT_MARKER_NOT_FOUND")
           base = base.replace(
               "`MATCH DRY: ${liveMatches.length} MATCH(ES) — ENCRYPTED`",
-              "`MATCH NOTIFY: ${notifyMatches.length} NEW MATCH(ES) — ENCRYPTED`",
+              "`MATCH V2 NOTIFY: ${notifyMatches.length} NEW MATCH(ES) — ENCRYPTED`",
               1,
           )
 
@@ -228,12 +246,12 @@ jobs:
 
               path = out_dir / f"observer_prod_{tag}.cjs"
               path.write_text(v, encoding="utf-8")
-              print(f"PRODUCTION VARIANT BUILT: {tag} chat_id={cid} title={title}")
+              print(f"PRODUCTION V2 VARIANT BUILT: {tag} chat_id={cid} title={title}")
           PY
 
           node --check observer_prod_requests.cjs
           node --check observer_prod_krasnodar.cjs
-          echo "PRODUCTION VARIANT SYNTAX: PASS"
+          echo "PRODUCTION V2 VARIANT SYNTAX: PASS"
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             export PHILIPPOV_SMOKE=1
@@ -241,12 +259,12 @@ jobs:
             export PHILIPPOV_SMOKE=0
           fi
 
-          echo "========== PRODUCTION GROUP 1: ЗАПРОСЫ =========="
+          echo "========== PRODUCTION V2 GROUP 1: ЗАПРОСЫ =========="
           timeout --signal=TERM --kill-after=5s 110s node observer_prod_requests.cjs
 
           export PHILIPPOV_SMOKE=0
 
-          echo "========== PRODUCTION GROUP 2: Запросы Краснодар =========="
+          echo "========== PRODUCTION V2 GROUP 2: Запросы Краснодар =========="
           timeout --signal=TERM --kill-after=5s 110s node observer_prod_krasnodar.cjs
 
-          echo "PHILIPPOV MAX OBSERVER PRODUCTION SENSOR: COMPLETE"
+          echo "PHILIPPOV MAX OBSERVER PRODUCTION V2 SENSOR: COMPLETE"
