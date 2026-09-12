@@ -1,4 +1,4 @@
-name: PHILIPPOV SCOUT — ONE-SHOT FULL VALIDATION DISPATCH
+name: PHILIPPOV SCOUT — ONE-SHOT SHADOW VALIDATION DISPATCH
 
 on:
   push:
@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Dispatch shadow and production once
+      - name: Dispatch shadow once
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -23,7 +23,4 @@ jobs:
           gh api --method POST \
             "repos/${GITHUB_REPOSITORY}/actions/workflows/request_match_v2_shadow.yml/dispatches" \
             -f ref="${GITHUB_REF_NAME:-main}"
-          gh api --method POST \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/max_observer_production.yml/dispatches" \
-            -f ref="${GITHUB_REF_NAME:-main}"
-          echo "FULL VALIDATION DISPATCH: PASS"
+          echo "ISOLATED SHADOW DISPATCH: PASS"
