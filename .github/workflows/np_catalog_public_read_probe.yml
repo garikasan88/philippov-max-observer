@@ -1,0 +1,57 @@
+name: NP catalog public read probe
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/np_catalog_public_read_probe.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Probe unauthenticated catalog GET
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, urllib.parse, urllib.request, urllib.error
+          base='https://app.neprostobot.ru/api/admin/max-group-catalog/groups'
+          url=base+'?'+urllib.parse.urlencode({'city':'Краснодар','limit':1000,'offset':0})
+          req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0','Accept':'application/json'})
+          try:
+              with urllib.request.urlopen(req,timeout=20) as r:
+                  raw=r.read(); status=r.status; ctype=r.headers.get('content-type')
+          except urllib.error.HTTPError as e:
+              raw=e.read(); status=e.code; ctype=e.headers.get('content-type')
+          print('STATUS',status,'BYTES',len(raw),'TYPE',ctype)
+          if status != 200:
+              print('BODY_PREFIX',raw[:300].decode('utf-8','replace').replace('\n',' '))
+              raise SystemExit(0)
+          try: x=json.loads(raw)
+          except Exception as e:
+              print('JSON_ERROR',type(e).__name__); raise SystemExit(0)
+          print('TOP_TYPE',type(x).__name__)
+          if isinstance(x,dict):
+              print('TOP_KEYS',sorted(x.keys()))
+              arr=None
+              for k in ['groups','items','results','data']:
+                  if isinstance(x.get(k),list): arr=x[k]; print('ARRAY_KEY',k,'COUNT',len(arr)); break
+          elif isinstance(x,list): arr=x; print('COUNT',len(arr))
+          else: arr=[]
+          if arr:
+              keys=sorted({k for row in arr[:100] if isinstance(row,dict) for k in row.keys()})
+              print('ROW_KEYS',keys)
+              # Only print aggregate distinct values for category-like fields, never URLs/IDs/group titles.
+              for ck in [k for k in keys if 'categor' in k.lower() or k.lower() in {'section','type','city','messenger','active'}]:
+                  vals={}
+                  for row in arr:
+                      if not isinstance(row,dict): continue
+                      v=row.get(ck)
+                      if isinstance(v,(str,int,float,bool)) or v is None:
+                          vals[str(v)]=vals.get(str(v),0)+1
+                  print('FIELD',ck,'DISTINCT',len(vals),'TOP',sorted(vals.items(), key=lambda z:(-z[1],z[0]))[:100])
+          PY
