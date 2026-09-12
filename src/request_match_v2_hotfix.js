@@ -35,3 +35,170 @@ parseRequest = function v2ParseRequestHotfix(text) {
   }
   return out;
 };
+
+// -----------------------------------------------------------------------------
+// V2.1 MULTI-REQUEST SPLITTER
+// Realtor chats often contain two or more independent client requests in one
+// message. V2 deliberately rejected such containers to prevent criteria from
+// leaking between clients. V2.1 keeps that fail-closed principle, but splits
+// only on strong explicit boundaries and matches every sub-request separately.
+// -----------------------------------------------------------------------------
+
+function v21CleanSegment(value) {
+  return String(value || '')
+    .replace(/^\s*(?:[-–—•*]+\s*)+/u, '')
+    .replace(/^\s*\d{1,2}\s*[.)-]\s*/u, '')
+    .replace(/^\s*(?:запрос)\s*(?:№\s*)?\d{0,2}\s*[:.)-]?\s*/iu, 'Запрос ')
+    .trim();
+}
+
+function v21NumberedSplit(raw) {
+  const src = String(raw || '').replace(/\r\n?/g, '\n');
+  const marker = /(?:^|\n|[;]\s*)\s*(\d{1,2})\s*[.)-]\s*/gmu;
+  const hits = [...src.matchAll(marker)];
+  if (hits.length < 2) return [];
+
+  const out = [];
+  for (let i = 0; i < hits.length; i++) {
+    const start = hits[i].index + hits[i][0].length;
+    const end = i + 1 < hits.length ? hits[i + 1].index : src.length;
+    const seg = v21CleanSegment(src.slice(start, end));
+    if (seg) out.push(seg);
+  }
+  return out;
+}
+
+function v21RequestAnchorSplit(raw) {
+  const src = String(raw || '').replace(/\r\n?/g, '\n');
+  const re = /\bзапрос\b(?:\s*№?\s*\d{1,2})?\s*[:.)-]?/giu;
+  const hits = [...src.matchAll(re)];
+  if (hits.length < 2) return [];
+
+  const out = [];
+  for (let i = 0; i < hits.length; i++) {
+    const start = hits[i].index;
+    const end = i + 1 < hits.length ? hits[i + 1].index : src.length;
+    const seg = v21CleanSegment(src.slice(start, end));
+    if (seg) out.push(seg);
+  }
+  return out;
+}
+
+function v21SplitMultiRequest(raw) {
+  const numbered = v21NumberedSplit(raw);
+  const anchored = v21RequestAnchorSplit(raw);
+
+  let parts = anchored.length >= 2 ? anchored : numbered;
+  if (parts.length < 2 || parts.length > 10) return [];
+
+  parts = parts
+    .map(v21CleanSegment)
+    .filter(x => x.length >= 8)
+    .map(x => /\bзапрос\b/iu.test(x) ? x : `Запрос ${x}`);
+
+  return parts.length >= 2 ? parts : [];
+}
+
+const __v21ParseObservedMessageBase = parseObservedMessage;
+parseObservedMessage = function requestMatchV21ParseObservedMessage(text) {
+  const base = __v21ParseObservedMessageBase(text);
+  if (!(base?.kind === 'IGNORE' && base?.reason === 'MULTI_REQUEST_UNSPLIT')) return base;
+
+  const parts = v21SplitMultiRequest(text);
+  if (parts.length < 2) return base;
+
+  const parsedParts = parts.map((raw, index) => ({
+    index: index + 1,
+    raw,
+    parsed: __v21ParseObservedMessageBase(raw),
+  }));
+
+  const valid = parsedParts.filter(x => x.parsed?.kind === 'REQUEST');
+  if (!valid.length) return base;
+
+  return {
+    kind: 'REQUEST',
+    reason: 'MULTI_REQUEST_SPLIT_V21',
+    raw: String(text || ''),
+    norm: normalizeText(text),
+    multiRequestV21: true,
+    subRequestsV21: valid,
+    splitTotalV21: parsedParts.length,
+    splitValidV21: valid.length,
+    splitRejectedV21: parsedParts.length - valid.length,
+  };
+};
+
+const __v21MatchRequestToLiveObjectBase = matchRequestToLiveObject;
+matchRequestToLiveObject = function requestMatchV21Match(req, obj) {
+  if (!req?.multiRequestV21 || !Array.isArray(req.subRequestsV21)) {
+    return __v21MatchRequestToLiveObjectBase(req, obj);
+  }
+
+  const rejectCounts = {};
+  for (const row of req.subRequestsV21) {
+    const verdict = __v21MatchRequestToLiveObjectBase(row.parsed, obj);
+    if (verdict.match) {
+      return {
+        ...verdict,
+        reason: 'MATCH_V21_SUBREQUEST',
+        reasons: [`SUBREQUEST:${row.index}`, ...(verdict.reasons || [])],
+        matchedSubRequestIndexV21: row.index,
+        matchedSubRequestV21: row.parsed,
+      };
+    }
+    const key = verdict.reason || 'UNKNOWN';
+    rejectCounts[key] = (rejectCounts[key] || 0) + 1;
+  }
+
+  return {
+    match: false,
+    reason: 'MULTI_REQUEST_NO_MATCH',
+    reasons: [],
+    subRejectCountsV21: rejectCounts,
+  };
+};
+
+function requestMatchV21SelfTest() {
+  const fail = (name, detail = '') => {
+    throw new Error(`REQUEST MATCH V2.1 SELFTEST ${name}${detail ? ': ' + detail : ''}`);
+  };
+  const fake = text => ({id:'v21', timestamp:Date.now(), text});
+
+  let r = parseObservedMessage(
+    '1) Запрос студия Губернский до 4 млн.\n2) Запрос студия Западный обход до 3,6 млн.'
+  );
+  if (r.kind !== 'REQUEST' || !r.multiRequestV21 || r.subRequestsV21.length !== 2) {
+    fail('numbered-split', JSON.stringify(r));
+  }
+
+  let o = parseObjectMessage(fake('Студия. Губернский. 28 м2. 3 900 000 руб. ремонт.'));
+  let v = matchRequestToLiveObject(r, o);
+  if (!v.match || v.matchedSubRequestIndexV21 !== 1) fail('numbered-first-match', JSON.stringify(v));
+
+  o = parseObjectMessage(fake('Студия. Западный обход. 28 м2. 3 500 000 руб. ремонт.'));
+  v = matchRequestToLiveObject(r, o);
+  if (!v.match || v.matchedSubRequestIndexV21 !== 2) fail('numbered-second-match', JSON.stringify(v));
+
+  o = parseObjectMessage(fake('Студия. ЧМР. 28 м2. 3 500 000 руб. ремонт.'));
+  if (matchRequestToLiveObject(r, o).match) fail('numbered-foreign-geo');
+
+  r = parseObservedMessage(
+    'Запрос: 1к ФМР до 6 млн\nЗапрос: 2к ГМР до 8 млн'
+  );
+  if (r.kind !== 'REQUEST' || !r.multiRequestV21 || r.subRequestsV21.length !== 2) {
+    fail('anchor-split', JSON.stringify(r));
+  }
+
+  const single = parseObservedMessage('Запрос 1к ФМР до 6 млн');
+  if (single.kind !== 'REQUEST' || single.multiRequestV21) fail('single-regression', JSON.stringify(single));
+
+  return 'REQUEST_MATCH_V21_MULTI_SPLIT_PASS';
+}
+
+const __v21ParserSelfTestBase = parserSelfTest;
+parserSelfTest = function parserSelfTestV21Wrapper() {
+  const base = __v21ParserSelfTestBase();
+  const v21 = requestMatchV21SelfTest();
+  return `${base} / ${v21}`;
+};
