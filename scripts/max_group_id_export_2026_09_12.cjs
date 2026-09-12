@@ -12,17 +12,14 @@ const exportPath = path.join(exportDir, 'max-groups.envelope.json');
 let src = fs.readFileSync(sourcePath, 'utf8');
 const startMarker = "          cat > observer.cjs <<'JS'\n";
 const endMarker = "\n          JS\n";
-if (!src.includes(startMarker) || !src.includes(endMarker)) {
-  throw new Error('OBSERVER_JS_BLOCK_NOT_FOUND');
-}
+if (!src.includes(startMarker) || !src.includes(endMarker)) throw new Error('OBSERVER_JS_BLOCK_NOT_FOUND');
 const start = src.indexOf(startMarker) + startMarker.length;
 const end = src.indexOf(endMarker, start);
 let js = src.slice(start, end);
 
 const oldUid = "const EXPECTED_USER_ID = '402668979';";
-const newUid = "const EXPECTED_USER_ID = '140053596';";
 if (!js.includes(oldUid)) throw new Error('EXPECTED_USER_PATCH_MARKER_NOT_FOUND');
-js = js.replace(oldUid, newUid);
+js = js.replace(oldUid, "const EXPECTED_USER_ID = '140053596';", 1);
 
 const checkpoint = "              console.log('SESSION CHECKPOINT AFTER LOGIN: PASS');";
 if (!js.includes(checkpoint)) throw new Error('SESSION_CHECKPOINT_MARKER_NOT_FOUND');
@@ -42,6 +39,9 @@ const publicKey = [
 ].join('\n');
 
 const injection = `
+
+              const { Opcode: ExportOpcode } = require('webmaxsocket/lib/opcodes');
+              console.log('CHATS LIST OPCODE: ' + String(ExportOpcode.CHATS_LIST));
 
               const collected = new Map();
               const addRows = (rows, source) => {
@@ -76,36 +76,29 @@ const injection = `
                 return out;
               };
 
-              const syncPayload = client?.lastSyncPayload && typeof client.lastSyncPayload === 'object'
-                ? client.lastSyncPayload
-                : {};
+              const syncPayload = client?.lastSyncPayload && typeof client.lastSyncPayload === 'object' ? client.lastSyncPayload : {};
               const syncRows = Array.isArray(syncPayload?.chats) ? syncPayload.chats : [];
               addRows(syncRows, 'sync');
               console.log('SYNC SHAPE: keys=' + JSON.stringify(Object.keys(syncPayload).sort()) + ' chats=' + syncRows.length + ' pagination=' + JSON.stringify(paginationScalars(syncPayload)));
 
               const markerCandidates = obj => {
                 if (!obj || typeof obj !== 'object') return [];
-                const keys = ['nextMarker','next_marker','marker','nextCursor','next_cursor','cursor','offset','nextOffset','next_offset'];
-                const vals = [];
-                for (const k of keys) {
-                  const v = obj[k];
-                  if (v === undefined || v === null || v === '') continue;
-                  vals.push({key:k, value:v});
-                }
-                return vals;
+                const keys = ['nextMarker','next_marker','chatMarker','chat_marker','marker','nextCursor','next_cursor','cursor','offset','nextOffset','next_offset'];
+                return keys.filter(k => obj[k] !== undefined && obj[k] !== null && obj[k] !== '').map(k => ({key:k,value:obj[k]}));
               };
 
-              let marker = 0;
+              let marker = syncPayload?.chatMarker ?? syncPayload?.chat_marker ?? null;
+              if (marker == null) console.log('RAW CHATS STOP: sync chatMarker absent');
               const seenMarkers = new Set();
-              for (let page = 0; page < 30; page++) {
+              for (let page = 0; marker != null && page < 30; page++) {
                 const markerKey = typeof marker + ':' + String(marker);
                 if (seenMarkers.has(markerKey)) {
-                  console.log('RAW CHATS STOP: repeated marker type=' + typeof marker);
+                  console.log('RAW CHATS STOP: repeated marker');
                   break;
                 }
                 seenMarkers.add(markerKey);
 
-                const response = await client.sendAndWait(53, {marker});
+                const response = await client.sendAndWait(ExportOpcode.CHATS_LIST, {marker});
                 const payload = response?.payload && typeof response.payload === 'object' ? response.payload : {};
                 const rows = Array.isArray(payload?.chats) ? payload.chats : [];
                 const added = addRows(rows, 'raw_chats_list');
@@ -115,9 +108,8 @@ const injection = `
                 if (!rows.length) break;
                 let next = null;
                 for (const item of candidates) {
-                  const v = item.value;
-                  if ((typeof v === 'number' || typeof v === 'string') && String(v) !== String(marker)) {
-                    next = v;
+                  if ((typeof item.value === 'number' || typeof item.value === 'string') && String(item.value) !== String(marker)) {
+                    next = item.value;
                     break;
                   }
                 }
@@ -128,9 +120,7 @@ const injection = `
                 marker = next;
               }
 
-              const allChats = [...collected.values()].sort((a, b) =>
-                a.title.localeCompare(b.title, 'ru') || a.id.localeCompare(b.id)
-              );
+              const allChats = [...collected.values()].sort((a, b) => a.title.localeCompare(b.title, 'ru') || a.id.localeCompare(b.id));
               const groups = allChats.filter(x => /^-\\d+$/.test(x.id));
               const exportPayload = {
                 schema: 'PHILIPPOV_MAX_GROUP_EXPORT_V1',
@@ -150,35 +140,25 @@ const injection = `
               const exportCipher = crypto.createCipheriv('aes-256-gcm', aesKey, exportIv);
               const ciphertext = Buffer.concat([exportCipher.update(plain), exportCipher.final()]);
               const exportTag = exportCipher.getAuthTag();
-              const wrappedKey = crypto.publicEncrypt({
-                key: exportPublicKey,
-                padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-                oaepHash: 'sha256',
-              }, aesKey);
-
-              fs.mkdirSync(${JSON.stringify(exportDir)}, { recursive: true });
+              const wrappedKey = crypto.publicEncrypt({key:exportPublicKey,padding:crypto.constants.RSA_PKCS1_OAEP_PADDING,oaepHash:'sha256'}, aesKey);
+              fs.mkdirSync(${JSON.stringify(exportDir)}, {recursive:true});
               fs.writeFileSync(${JSON.stringify(exportPath)}, JSON.stringify({
-                schema: 'PHILIPPOV_ENCRYPTED_EXPORT_V1',
-                algorithm: 'RSA-OAEP-SHA256 + AES-256-GCM',
-                wrappedKey: wrappedKey.toString('base64'),
-                iv: exportIv.toString('base64'),
-                tag: exportTag.toString('base64'),
-                ciphertext: ciphertext.toString('base64'),
-                counts: { allChats: allChats.length, groupCandidates: groups.length },
+                schema:'PHILIPPOV_ENCRYPTED_EXPORT_V1',
+                algorithm:'RSA-OAEP-SHA256 + AES-256-GCM',
+                wrappedKey:wrappedKey.toString('base64'),
+                iv:exportIv.toString('base64'),
+                tag:exportTag.toString('base64'),
+                ciphertext:ciphertext.toString('base64'),
+                counts:{allChats:allChats.length,groupCandidates:groups.length},
               }), 'utf8');
               console.log('GROUP EXPORT COMPLETE: allChats=' + allChats.length + ' groupCandidates=' + groups.length);
               process.exit(0);
 `;
 
-js = js.replace(checkpoint, checkpoint + injection);
+js = js.replace(checkpoint, checkpoint + injection, 1);
 fs.writeFileSync(runtimePath, js, 'utf8');
 console.log('ENCRYPTED GROUP EXPORT PATCH: PASS');
-
-const child = spawnSync(process.execPath, [runtimePath], {
-  stdio: 'inherit',
-  env: process.env,
-});
-
+const child = spawnSync(process.execPath, [runtimePath], {stdio:'inherit', env:process.env});
 try { fs.unlinkSync(runtimePath); } catch {}
 if (child.error) throw child.error;
 process.exit(typeof child.status === 'number' ? child.status : 1);
