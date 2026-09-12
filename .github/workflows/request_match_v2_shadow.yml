@@ -66,15 +66,30 @@ jobs:
               raise SystemExit('MAIN_INSERT_POINT_NOT_FOUND')
           js = js.replace(main_marker, "\n" + patch + "\n" + hotfix + "\n" + main_marker, 1)
 
-          # Stable object source ID was confirmed in successful production runs.
-          # Title lookup only scans getChats(200,0), so after mass group joining the
-          # object chat can fall outside that window. Shadow uses the confirmed ID
-          # directly and does not modify production yet.
           old_object_block = """              const objectChat = await discoverChatByExactTitle(client, OBJECT_CHAT_TITLE);\n              if (!objectChat?.id) throw new Error(`OBJECT_CHAT_NOT_FOUND title=${OBJECT_CHAT_TITLE}`);\n              const objectCid = String(objectChat.id);\n              const objectHistory = await client.getHistory(Number(objectCid), Date.now(), HISTORY_BACKWARD, 0);"""
           new_object_block = """              const objectCid = '-75607874388089';\n              console.log(`OBJECT SOURCE RESOLVE: STABLE_ID chat_id=${objectCid}`);\n              const objectHistory = await client.getHistory(Number(objectCid), Date.now(), HISTORY_BACKWARD, 0);"""
           if old_object_block not in js:
               raise SystemExit('OBJECT_SOURCE_BLOCK_NOT_FOUND')
           js = js.replace(old_object_block, new_object_block, 1)
+
+          # Add safe aggregate diagnostics: reject reasons only, no raw request/object text.
+          live_start = """              const liveMatches = [];\n              for (const reqRow of recentRequests) {"""
+          live_start_repl = """              const liveMatches = [];\n              const v2RejectCounts = {};\n              for (const reqRow of recentRequests) {"""
+          if live_start not in js:
+              raise SystemExit('LIVE_MATCH_START_NOT_FOUND')
+          js = js.replace(live_start, live_start_repl, 1)
+
+          verdict_line = """                  const verdict = matchRequestToLiveObject(reqRow.parsed, obj);\n                  if (verdict.match) liveMatches.push({"""
+          verdict_repl = """                  const verdict = matchRequestToLiveObject(reqRow.parsed, obj);\n                  if (!verdict.match) v2RejectCounts[verdict.reason || 'UNKNOWN'] = (v2RejectCounts[verdict.reason || 'UNKNOWN'] || 0) + 1;\n                  if (verdict.match) liveMatches.push({"""
+          if verdict_line not in js:
+              raise SystemExit('VERDICT_DIAG_INSERT_POINT_NOT_FOUND')
+          js = js.replace(verdict_line, verdict_repl, 1)
+
+          live_log = """              console.log(`LIVE MATCH DRY: PASS requests=${recentRequests.length} objects=${objects.length} matches=${liveMatches.length}`);"""
+          live_log_repl = live_log + "\n              console.log(`V2 MATCH REJECT COUNTS: ${JSON.stringify(v2RejectCounts)}`);"
+          if live_log not in js:
+              raise SystemExit('LIVE_MATCH_LOG_NOT_FOUND')
+          js = js.replace(live_log, live_log_repl, 1)
 
           old_uid = "const EXPECTED_USER_ID = '402668979';"
           old_cid = "const TARGET_CHAT_ID = '-78471339098233';"
