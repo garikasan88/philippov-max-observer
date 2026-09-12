@@ -1,0 +1,73 @@
+name: NEPROSTOBOT public frontend probe
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/neprostobot_public_bundle_probe.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe public app frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/np && cd /tmp/np
+          curl -L --max-time 30 -A 'Mozilla/5.0' -sS -D headers.txt -o index.html 'https://app.neprostobot.ru/' || true
+          echo '=== INDEX SIZE ==='
+          wc -c index.html || true
+          echo '=== HEADERS ==='
+          sed -n '1,40p' headers.txt | sed -E 's/(set-cookie:).*/\1 [redacted]/I'
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, html, urllib.parse, subprocess
+          root='https://app.neprostobot.ru/'
+          text=Path('index.html').read_text('utf-8',errors='ignore') if Path('index.html').exists() else ''
+          srcs=[]
+          for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)', text, re.I):
+              srcs.append(html.unescape(m.group(1)))
+          for m in re.finditer(r'<link[^>]+href=["\']([^"\']+\.js(?:\?[^"\']*)?)', text, re.I):
+              srcs.append(html.unescape(m.group(1)))
+          urls=[]
+          for s in srcs:
+              u=urllib.parse.urljoin(root,s)
+              if u not in urls: urls.append(u)
+          print('SCRIPT_URLS', len(urls))
+          for i,u in enumerate(urls[:50]): print('SCRIPT',i,u)
+          blobs=[]
+          for i,u in enumerate(urls[:50]):
+              try:
+                  p=Path(f'bundle_{i}.js')
+                  subprocess.run(['curl','-L','--max-time','30','-A','Mozilla/5.0','-sS',u,'-o',str(p)],check=False)
+                  if p.exists() and p.stat().st_size:
+                      blobs.append((u,p.read_text('utf-8',errors='ignore')))
+              except Exception as e:
+                  print('FETCH_ERR',i,type(e).__name__)
+          needles=['Разложить по категориям','Перераспределить все группы','Группы без категории','Проверьте результат','авторасклад','категор','categor','redistribut','autojoin','autoJoin']
+          print('BUNDLES_FETCHED', len(blobs), 'TOTAL_BYTES', sum(len(t) for _,t in blobs))
+          for u,t in blobs:
+              low=t.lower()
+              for needle in needles:
+                  pos=low.find(needle.lower())
+                  if pos>=0:
+                      a=max(0,pos-500); b=min(len(t),pos+1000)
+                      ctx=re.sub(r'\s+',' ',t[a:b])
+                      print('\nMATCH',needle,'URL',u,'\nCTX',ctx[:1800])
+          pats=[
+              r'["\']([^"\']*(?:categor|group|auto.?join|max)[^"\']*)["\']',
+              r'/(?:api|ajax|actions?)/[A-Za-z0-9_./?=&${}-]{3,180}'
+          ]
+          vals=[]
+          for u,t in blobs:
+              for pat in pats:
+                  for m in re.finditer(pat,t,re.I):
+                      v=m.group(1) if m.lastindex else m.group(0)
+                      if len(v)<=220 and v not in vals: vals.append(v)
+          print('\n=== RELEVANT STRING CANDIDATES ===')
+          for v in vals[:500]: print(v)
+          PY
