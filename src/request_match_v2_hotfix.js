@@ -48,7 +48,9 @@ function v21CleanSegment(value) {
   return String(value || '')
     .replace(/^\s*(?:[-–—•*]+\s*)+/u, '')
     .replace(/^\s*\d{1,2}\s*[.)-]\s*/u, '')
-    .replace(/^\s*(?:запрос)\s*(?:№\s*)?\d{0,2}\s*[:.)-]?\s*/iu, 'Запрос ')
+    // Strip only an explicit request ordinal ("Запрос №2", "Запрос 2:").
+    // Never eat room counts such as "Запрос 1к" / "Запрос 2к".
+    .replace(/^\s*(?:запрос)\s*(?:(?:№\s*\d{1,2}\s*[:.)-]?)|(?:\d{1,2}\s*[:.)-]))?\s*/iu, 'Запрос ')
     .trim();
 }
 
