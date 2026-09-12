@@ -171,8 +171,15 @@ jobs:
                 };
 
                 for (const m of notifyMatches) {
-                  const req = m.request || {};
+                  const matchView = v21MatchedRequestView(m.request || {}, m.reasons || []);
+                  const req = matchView.request || {};
                   const obj = m.object || {};
+                  const humanReasons = Array.isArray(m.reasons)
+                    ? m.reasons.filter(x => !/^SUBREQUEST:\d+$/u.test(String(x || '').trim()))
+                    : [];
+                  const subrequestLine = matchView.isMulti && matchView.index
+                    ? `Подзапрос: ${matchView.index} из ${matchView.total || '?'}`
+                    : null;
 
                   const notifyText = [
                     'PHILIPPOV MATCH V2',
@@ -180,16 +187,17 @@ jobs:
                     `Группа: ${group}`,
                     `Запрос от: ${m.requestSender || 'НЕ УСТАНОВЛЕНО'}`,
                     `Время запроса: ${m.requestTime || 'НЕ УСТАНОВЛЕНО'}`,
+                    ...(subrequestLine ? [subrequestLine] : []),
                     '',
                     'ЗАПРОС:',
-                    clip(req.raw, 850),
+                    clip(matchView.raw || req.raw, 850),
                     '',
                     'НАШ ОБЪЕКТ:',
                     clip(obj.sourceText || obj?.profile?.address || m.objectId, 1100),
                     '',
                     `Цена объекта: ${rub(obj.price)}`,
                     `Площадь: ${obj.area ?? 'НЕ УСТАНОВЛЕНО'}`,
-                    `Совпало по: ${Array.isArray(m.reasons) && m.reasons.length ? m.reasons.join(', ') : 'MATCH_V2'}`,
+                    `Совпало по: ${humanReasons.length ? humanReasons.join(', ') : 'MATCH_V2'}`,
                   ].join('\n');
 
                   await client.sendMessage({
@@ -197,6 +205,8 @@ jobs:
                     text: notifyText,
                   });
 
+                  // Keep the historical dedup key stable: changing its shape would
+                  // make remembered matches look new and could resend old notifications.
                   const key = `${cid}|${m.requestMessageId}|${m.objectId}`;
                   notifiedKeys.add(key);
                   console.log(`MATCH NOTIFY: PASS key=${key}`);
