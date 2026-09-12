@@ -1,0 +1,56 @@
+name: NP Next chunk probe
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/np_next_chunk_probe.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Inspect public Next chunks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/npchunks && cd /tmp/npchunks
+          for u in \
+            'https://app.neprostobot.ru/_next/static/chunks/0og-vp.lhzrrv.js' \
+            'https://app.neprostobot.ru/_next/static/chunks/0vv3ducgxa3.~.js' \
+            'https://app.neprostobot.ru/_next/static/chunks/0wyxdmhuni9cw.js' \
+            'https://app.neprostobot.ru/_next/static/chunks/0_hufvg.88~_-.js'; do
+            f=$(basename "$u")
+            curl -L --max-time 30 -A 'Mozilla/5.0' -sS "$u" -o "$f" || true
+            echo "FILE $f BYTES $(wc -c < "$f" 2>/dev/null || echo 0)"
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          files=list(Path('.').glob('*.js'))
+          needles=['Разложить по категориям','Перераспределить все группы','Группы без категории','Проверьте результат','Распределить','category','categories','categorize','autoCategor','rpc/','method_name','group','preview','suggest','classif','distribution']
+          for p in files:
+              t=p.read_text('utf-8',errors='ignore')
+              print('\n###',p.name,'###')
+              low=t.lower()
+              hits=[]
+              for needle in needles:
+                  start=0
+                  while True:
+                      pos=low.find(needle.lower(),start)
+                      if pos<0: break
+                      hits.append((pos,needle)); start=pos+1
+              seen=set()
+              for pos,needle in sorted(hits)[:120]:
+                  a=max(0,pos-700); b=min(len(t),pos+1500)
+                  ctx=re.sub(r'\s+',' ',t[a:b])
+                  # redact obvious long tokens/credentials while preserving code strings
+                  ctx=re.sub(r'(?i)(authorization|token|cookie|secret)(.{0,8})[A-Za-z0-9._~-]{40,}',r'\1\2[redacted]',ctx)
+                  sig=(needle,ctx[:240])
+                  if sig in seen: continue
+                  seen.add(sig)
+                  print('\nHIT',needle,'POS',pos,'\n',ctx[:2200])
+          PY
