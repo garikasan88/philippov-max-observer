@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - name: Extract category RPC methods
+      - name: Extract category RPC payloads
         shell: bash
         run: |
           set -euo pipefail
@@ -24,59 +24,21 @@ jobs:
           import re
           t=Path('/tmp/np.js').read_text('utf-8',errors='ignore')
           print('BYTES',len(t))
-
-          def ctx(label, needle, before=1800, after=3200, max_hits=12):
-              low=t.lower(); q=needle.lower(); start=0; count=0
-              while count<max_hits:
-                  pos=low.find(q,start)
+          for method in ['getAutoCategoryPlan','applyAutoCategories','revertAutoCategories','dismissAutoCategoryPrompt','saveCustomCategories','updateGroupCategories']:
+              start=0; hit=0
+              while True:
+                  pos=t.find(method,start)
                   if pos<0: break
-                  a=max(0,pos-before); b=min(len(t),pos+after)
+                  hit+=1
+                  a=max(0,pos-2600); b=min(len(t),pos+4200)
                   s=re.sub(r'\s+',' ',t[a:b])
-                  s=re.sub(r'(?i)(authorization|cookie|secret|token)(.{0,8})[A-Za-z0-9._~-]{40,}',r'\1\2[redacted]',s)
-                  print(f'\n=== {label} HIT {count+1} POS {pos} ===\n{s}')
-                  start=pos+len(q); count+=1
-              print(f'COUNT {label} {count}')
+                  print(f'\n=== {method} HIT {hit} POS {pos} ===\n{s}')
+                  start=pos+len(method)
+              print('COUNT',method,hit)
 
-          # Exact UI phrases and handler names around the feature.
-          for label,needle in [
-              ('AUTO_HANDLER','onAutoCategorize'),
-              ('AUTO_WORD','autoCategorize'),
-              ('DIALOG_TITLE','Разложить по категориям'),
-              ('UNCATEGORIZED','Группы без категории'),
-              ('CHECK_RESULT','Проверьте результат'),
-              ('REDISTRIBUTE','Перераспределить все группы'),
-              ('DISTRIBUTE_BUTTON','Распределить'),
-              ('SET_GROUP_CATEGORIES','setGroupCategories'),
-              ('MOVE_GROUPS','moveGroups'),
-              ('ADD_CATEGORY','addCategory'),
-              ('DELETE_CATEGORY','deleteCategory'),
-          ]:
-              ctx(label,needle)
-
-          # Extract literal method names passed through the tenant RPC helper nh(..., "method", ...).
-          methods=[]
-          for m in re.finditer(r'nh\([^,]{1,120},\s*["\']([^"\']+)["\']\s*,',t):
-              name=m.group(1)
-              if name not in methods: methods.append(name)
-          print('\n=== RPC_LITERAL_METHODS ===')
-          for name in methods:
-              if any(k in name.lower() for k in ['group','categor','sync','max','telegram','broadcast','advert','stat']):
-                  print(name)
-
-          # Extract all quoted identifier-like strings mentioning categorize/category to catch indirect dispatch maps.
-          vals=[]
-          for m in re.finditer(r'["\']([A-Za-z][A-Za-z0-9_]{2,80})["\']',t):
-              v=m.group(1)
-              if ('categor' in v.lower() or 'group' in v.lower()) and v not in vals:
-                  vals.append(v)
-          print('\n=== CATEGORY_GROUP_IDENTIFIERS ===')
-          for v in vals: print(v)
-
-          # Helper definition / endpoint builder.
-          for pat in [r'function\s+nh\s*\(', r'\bnh\s*=\s*async', r'\bnh\s*=\s*\(']:
-              m=re.search(pat,t)
-              if m:
-                  pos=m.start(); s=re.sub(r'\s+',' ',t[max(0,pos-1200):min(len(t),pos+3500)])
-                  print('\n=== NH_DEFINITION ===\n',s)
-                  break
+          # Pull compact literal RPC call expressions for exact arg arrays.
+          print('\n=== COMPACT RPC CALLS ===')
+          pat=re.compile(r'nh\((.{0,180}?),\s*["\'](getAutoCategoryPlan|applyAutoCategories|revertAutoCategories|dismissAutoCategoryPrompt|saveCustomCategories|updateGroupCategories)["\']\s*,\s*(\[[\s\S]{0,700}?\])\)',re.M)
+          for m in pat.finditer(t):
+              print(m.group(2),'BASE=',re.sub(r'\s+',' ',m.group(1)),'ARGS=',re.sub(r'\s+',' ',m.group(3)))
           PY
