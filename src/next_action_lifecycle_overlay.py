@@ -19,8 +19,10 @@ def apply_next_action_lifecycle_overlay(src: str) -> str:
     - exposes the action ID and command syntax in new MATCH notifications.
     """
 
-    cursor_marker = '              "              const cursor = initialCursor;"'
-    cursor_repl = r'''              "              const cursor = initialCursor;\n"
+    cursor_marker = r'''              "              }\n\n"
+              "              const cursor = initialCursor;"'''
+    cursor_repl = r'''              "              }\n\n"
+              "              const cursor = initialCursor;\n"
               "              cursor.nextActions = cursor.nextActions && typeof cursor.nextActions === 'object' && !Array.isArray(cursor.nextActions) ? cursor.nextActions : {};\n"
               "              cursor.nextActionEvents = Array.isArray(cursor.nextActionEvents) ? cursor.nextActionEvents : [];\n"
               "              cursor.nextActionControlSeenIds = Array.isArray(cursor.nextActionControlSeenIds) ? cursor.nextActionControlSeenIds.map(String) : [];\n"
