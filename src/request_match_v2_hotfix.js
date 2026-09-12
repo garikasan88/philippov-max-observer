@@ -213,6 +213,132 @@ function v21MatchedRequestView(request, reasons = []) {
   };
 }
 
+// -----------------------------------------------------------------------------
+// NEXT ACTION LIFECYCLE
+// OPEN → IN_PROGRESS → DONE / REJECTED, with an explicit OPEN command allowed
+// to reopen an action. Commands are deliberately strict to avoid interpreting
+// ordinary direct-chat text as workflow control.
+// -----------------------------------------------------------------------------
+
+function nextActionStableId(sourceMatchKey) {
+  const key = String(sourceMatchKey || '').trim();
+  if (!key) return null;
+  return `NA-${crypto.createHash('sha256').update(key).digest('hex').slice(0, 8).toUpperCase()}`;
+}
+
+function nextActionCreate({ sourceMatchKey, requestAuthor = '', now = null } = {}) {
+  const key = String(sourceMatchKey || '').trim();
+  const id = nextActionStableId(key);
+  if (!id) throw new Error('NEXT_ACTION_SOURCE_KEY_REQUIRED');
+  const at = String(now || new Date().toISOString());
+  const author = String(requestAuthor || '').trim();
+  return {
+    id,
+    kind: 'NEXT_ACTION',
+    code: 'VERIFY_OBJECT_AND_CONTACT_REQUEST_AUTHOR',
+    status: 'OPEN',
+    priority: 'HIGH',
+    sourceMatchKey: key,
+    createdAt: at,
+    updatedAt: at,
+    text: author
+      ? `Проверить актуальность объекта → связаться с ${author} и предложить этот объект.`
+      : 'Проверить актуальность объекта → связаться с автором запроса и предложить этот объект.',
+  };
+}
+
+function nextActionParseCommand(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  const m = raw.match(/^\s*(?:СКАУТ|SCOUT)\s+(NA-[A-F0-9]{8})\s+(.+?)\s*$/iu);
+  if (!m) return null;
+  const id = String(m[1]).toUpperCase();
+  const cmd = normalizeText(m[2]);
+
+  let status = null;
+  if (['в работу', 'работа', 'start', 'in progress', 'in_progress'].includes(cmd)) status = 'IN_PROGRESS';
+  else if (['готово', 'сделано', 'done', 'закрыть'].includes(cmd)) status = 'DONE';
+  else if (['отклонить', 'отклонено', 'reject', 'rejected'].includes(cmd)) status = 'REJECTED';
+  else if (['открыть', 'open', 'вернуть'].includes(cmd)) status = 'OPEN';
+  if (!status) return { id, status: null, raw, reason: 'UNKNOWN_COMMAND' };
+  return { id, status, raw, reason: 'CONTROL_COMMAND' };
+}
+
+function nextActionTransition(action, targetStatus, at = null) {
+  if (!action || action.kind !== 'NEXT_ACTION') return { changed: false, reason: 'ACTION_INVALID', action };
+  const from = String(action.status || 'OPEN').toUpperCase();
+  const to = String(targetStatus || '').toUpperCase();
+  const allowed = new Set(['OPEN', 'IN_PROGRESS', 'DONE', 'REJECTED']);
+  if (!allowed.has(to)) return { changed: false, reason: 'STATUS_INVALID', action };
+  if (from === to) return { changed: false, reason: 'NOOP', action };
+
+  const transitions = {
+    OPEN: new Set(['IN_PROGRESS', 'DONE', 'REJECTED']),
+    IN_PROGRESS: new Set(['OPEN', 'DONE', 'REJECTED']),
+    DONE: new Set(['OPEN']),
+    REJECTED: new Set(['OPEN']),
+  };
+  if (!transitions[from]?.has(to)) return { changed: false, reason: 'TRANSITION_BLOCKED', action };
+
+  const updatedAt = String(at || new Date().toISOString());
+  return {
+    changed: true,
+    reason: 'TRANSITION_APPLIED',
+    action: {
+      ...action,
+      status: to,
+      updatedAt,
+      ...(to === 'DONE' ? { completedAt: updatedAt } : {}),
+      ...(to === 'REJECTED' ? { rejectedAt: updatedAt } : {}),
+      ...(to === 'OPEN' ? { completedAt: null, rejectedAt: null } : {}),
+    },
+  };
+}
+
+function nextActionApplyCommand(registry, text, at = null) {
+  const command = nextActionParseCommand(text);
+  if (!command) return { handled: false, changed: false, reason: 'NOT_COMMAND' };
+  if (!command.status) return { handled: true, changed: false, reason: command.reason, command };
+  const store = registry && typeof registry === 'object' ? registry : {};
+  const current = store[command.id];
+  if (!current) return { handled: true, changed: false, reason: 'ACTION_NOT_FOUND', command };
+  const transition = nextActionTransition(current, command.status, at);
+  if (transition.changed) store[command.id] = transition.action;
+  return {
+    handled: true,
+    changed: transition.changed,
+    reason: transition.reason,
+    command,
+    action: transition.action,
+  };
+}
+
+function nextActionLifecycleSelfTest() {
+  const fail = (name, detail = '') => {
+    throw new Error(`NEXT ACTION LIFECYCLE SELFTEST ${name}${detail ? ': ' + detail : ''}`);
+  };
+  const key = '-70193851621530|req-123|obj-456';
+  const a = nextActionCreate({ sourceMatchKey: key, requestAuthor: 'Маша', now: '2026-09-12T10:00:00.000Z' });
+  if (!/^NA-[A-F0-9]{8}$/u.test(a.id) || a.status !== 'OPEN' || a.sourceMatchKey !== key) fail('create', JSON.stringify(a));
+  if (nextActionStableId(key) !== a.id) fail('stable-id');
+
+  const registry = { [a.id]: a };
+  let r = nextActionApplyCommand(registry, `СКАУТ ${a.id} В РАБОТУ`, '2026-09-12T10:01:00.000Z');
+  if (!r.changed || registry[a.id].status !== 'IN_PROGRESS') fail('in-progress', JSON.stringify(r));
+  r = nextActionApplyCommand(registry, `SCOUT ${a.id} DONE`, '2026-09-12T10:02:00.000Z');
+  if (!r.changed || registry[a.id].status !== 'DONE' || !registry[a.id].completedAt) fail('done', JSON.stringify(r));
+  r = nextActionApplyCommand(registry, `СКАУТ ${a.id} ОТКРЫТЬ`, '2026-09-12T10:03:00.000Z');
+  if (!r.changed || registry[a.id].status !== 'OPEN' || registry[a.id].completedAt !== null) fail('reopen', JSON.stringify(r));
+  r = nextActionApplyCommand(registry, `СКАУТ ${a.id} ОТКЛОНИТЬ`, '2026-09-12T10:04:00.000Z');
+  if (!r.changed || registry[a.id].status !== 'REJECTED' || !registry[a.id].rejectedAt) fail('reject', JSON.stringify(r));
+  r = nextActionApplyCommand(registry, 'обычный текст', '2026-09-12T10:05:00.000Z');
+  if (r.handled) fail('ordinary-text');
+  r = nextActionApplyCommand(registry, 'СКАУТ NA-FFFFFFFF ГОТОВО', '2026-09-12T10:06:00.000Z');
+  if (!r.handled || r.reason !== 'ACTION_NOT_FOUND') fail('unknown-id', JSON.stringify(r));
+
+  return 'NEXT_ACTION_LIFECYCLE_PASS';
+}
+
 function requestMatchV21SelfTest() {
   const fail = (name, detail = '') => {
     throw new Error(`REQUEST MATCH V2.1 SELFTEST ${name}${detail ? ': ' + detail : ''}`);
