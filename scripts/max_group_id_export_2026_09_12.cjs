@@ -39,7 +39,7 @@ const publicKey = [
   'rLjHREUM2M8VOS2y/VhlckyYYvQirSuUJYMvaIva4j07eIS5L1DJLIGcyO0VKEYi',
   'fYqqASmFiFKQZ9AB3VDgRsdRJhIIlgkPghvF8iGUeiXNAgMBAAE=',
   '-----END PUBLIC KEY-----',
-].join('\\n');
+].join('\n');
 
 const injection = `
 
