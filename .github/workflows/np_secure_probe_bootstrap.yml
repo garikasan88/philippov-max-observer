@@ -1,0 +1,46 @@
+name: NP secure probe bootstrap
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/np_secure_probe_bootstrap.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      WRAP_SECRET: ${{ secrets.MAX_SESSION }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Generate encrypted probe key state
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$WRAP_SECRET"
+          mkdir -p .np_probe
+          node <<'JS'
+          const fs=require('fs');
+          const crypto=require('crypto');
+          const secret=String(process.env.WRAP_SECRET||'');
+          const {publicKey,privateKey}=crypto.generateKeyPairSync('rsa',{modulusLength:3072,publicKeyEncoding:{type:'spki',format:'pem'},privateKeyEncoding:{type:'pkcs8',format:'pem'}});
+          const key=crypto.createHash('sha256').update('NP_SECURE_PROBE\0'+secret).digest();
+          const iv=crypto.randomBytes(12);
+          const cipher=crypto.createCipheriv('aes-256-gcm',key,iv);
+          const enc=Buffer.concat([cipher.update(Buffer.from(privateKey,'utf8')),cipher.final()]);
+          const state={v:1,iv:iv.toString('base64'),tag:cipher.getAuthTag().toString('base64'),data:enc.toString('base64')};
+          fs.writeFileSync('.np_probe/public.pem',publicKey);
+          fs.writeFileSync('.np_probe/private.enc.json',JSON.stringify(state));
+          console.log('NP PROBE KEY BOOTSTRAP: PASS');
+          JS
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .np_probe/public.pem .np_probe/private.enc.json
+          git commit -m 'Store encrypted NP probe key state'
+          git push
