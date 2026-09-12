@@ -93,10 +93,19 @@ jobs:
               "`Подзапрос: ${matchView.index} из ${matchView.total || '?'}`",
               "clip(matchView.raw || req.raw, 850)",
               "m.reasons.filter(x => !/^SUBREQUEST:\\d+$/u.test(String(x || '').trim()))",
-              "const key = `${cid}|${m.requestMessageId}|${m.objectId}`;",
+              "const matchKey = `${cid}|${m.requestMessageId}|${m.objectId}`;",
+              "code: 'VERIFY_OBJECT_AND_CONTACT_REQUEST_AUTHOR'",
+              "status: 'OPEN'",
+              "priority: 'HIGH'",
+              "m.nextAction = nextAction;",
+              "'СЛЕДУЮЩЕЕ ДЕЙСТВИЕ:'",
+              "nextAction.text",
+              "`Статус: ${nextAction.status}`",
+              "const encryptedMatches = encryptSession(notifyMatches, BOOTSTRAP_RAW);",
+              "const key = matchKey;",
           ]
           missing = [needle for needle in required if needle not in prod]
           if missing:
-              raise SystemExit('PRODUCTION_MATCH_VIEW_WIRING_MISSING: ' + repr(missing))
-          print('PRODUCTION MATCH VIEW WIRING: PASS')
+              raise SystemExit('PRODUCTION_NEXT_ACTION_WIRING_MISSING: ' + repr(missing))
+          print('PRODUCTION MATCH VIEW + NEXT ACTION WIRING: PASS')
           PY
