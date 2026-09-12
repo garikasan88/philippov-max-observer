@@ -20,7 +20,18 @@ v2ExtractExcludedGeo = function v2ExtractExcludedGeoHotfix(raw) {
 const __v2GeoModeBase = v2GeoMode;
 v2GeoMode = function v2GeoModeHotfix(raw, geos, complexes, addresses) {
   const n = normalizeText(raw);
-  // Natural realtor order is both "любой район" and "район любой".
-  if (/\b(?:любой\s+район|район\s+любой)\b/iu.test(n)) return 'ANY';
+  if (/(?:любой\s+район|район\s+любой)/iu.test(n)) return 'ANY';
   return __v2GeoModeBase(raw, geos, complexes, addresses);
+};
+
+const __v2ParseRequestBase = parseRequest;
+parseRequest = function v2ParseRequestHotfix(text) {
+  const out = __v2ParseRequestBase(text);
+  if (out?.kind === 'REQUEST' && /(?:любой\s+район|район\s+любой)/iu.test(normalizeText(text))) {
+    out.geoModeV2 = 'ANY';
+    out.geoMentionedV2 = true;
+    out.geoUnresolvedV2 = false;
+    if (out.hardV2) out.hardV2.strictGeo = false;
+  }
+  return out;
 };
