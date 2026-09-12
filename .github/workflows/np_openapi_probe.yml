@@ -1,0 +1,56 @@
+name: NP public OpenAPI probe
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/np_openapi_probe.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Inspect public OpenAPI routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, urllib.request
+          url='https://app.neprostobot.ru/openapi.json'
+          req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+          try:
+              with urllib.request.urlopen(req,timeout=20) as r:
+                  raw=r.read()
+                  print('STATUS',r.status,'BYTES',len(raw),'TYPE',r.headers.get('content-type'))
+          except Exception as e:
+              print('OPENAPI_ERROR',type(e).__name__,str(e)[:300])
+              raise SystemExit(0)
+          try:
+              doc=json.loads(raw)
+          except Exception as e:
+              print('JSON_ERROR',type(e).__name__)
+              raise SystemExit(0)
+          print('TITLE',doc.get('info',{}).get('title'))
+          paths=doc.get('paths',{})
+          print('PATH_COUNT',len(paths))
+          keys=('max','group','categor','auto','join','mail','broadcast','sort','redistrib','preview','suggest')
+          for p,ops in paths.items():
+              blob=(p+' '+json.dumps(ops,ensure_ascii=False)).lower()
+              if not any(k in blob for k in keys):
+                  continue
+              print('\nPATH',p)
+              for method,meta in ops.items():
+                  if method.lower() not in {'get','post','put','patch','delete'}: continue
+                  print(' ',method.upper(),'operationId=',meta.get('operationId'),'summary=',meta.get('summary'))
+                  params=[]
+                  for x in meta.get('parameters',[]):
+                      params.append({'name':x.get('name'),'in':x.get('in'),'required':x.get('required'),'schema':x.get('schema')})
+                  if params: print('  params=',json.dumps(params,ensure_ascii=False))
+                  if 'requestBody' in meta:
+                      print('  requestBody=',json.dumps(meta['requestBody'],ensure_ascii=False)[:2500])
+                  rs=meta.get('responses',{})
+                  print('  responses=',json.dumps({k:v.get('description') for k,v in rs.items()},ensure_ascii=False))
+          PY
