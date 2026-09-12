@@ -1,0 +1,39 @@
+name: NP cabinet loader probe
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/np_cabinet_loader_probe.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Inspect public Neprostobot client chunk
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp
+          curl -L --max-time 30 -A 'Mozilla/5.0' -sS 'https://app.neprostobot.ru/_next/static/chunks/0og-vp.lhzrrv.js' -o np.js
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          t=Path('/tmp/np.js').read_text('utf-8',errors='ignore')
+          print('BYTES',len(t))
+          for needle in ['async function su','function su','su=async','function nh','nh=async','/api/cabinet/max/','syncGroupsForWeb']:
+              print('\n###',needle)
+              start=0
+              hits=0
+              while hits<5:
+                  p=t.find(needle,start)
+                  if p<0: break
+                  hits+=1
+                  a=max(0,p-3500); b=min(len(t),p+5500)
+                  print(re.sub(r'\s+',' ',t[a:b]))
+                  start=p+len(needle)
+              print('HITS',hits)
+          PY
