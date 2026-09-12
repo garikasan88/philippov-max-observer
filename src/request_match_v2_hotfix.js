@@ -70,14 +70,18 @@ function v21NumberedSplit(raw) {
 
 function v21RequestAnchorSplit(raw) {
   const src = String(raw || '').replace(/\r\n?/g, '\n');
-  const re = /\bзапрос\b(?:\s*№?\s*\d{1,2})?\s*[:.)-]?/giu;
-  const hits = [...src.matchAll(re)];
+  // Strong boundary only: start of message/line, semicolon, or sentence boundary.
+  // This avoids splitting ordinary prose merely because the word "запрос" repeats.
+  const re = /(?:^|\n|;|[.!?]\s+)\s*(?:\d{1,2}\s*[.)-]\s*)?(запрос(?:\s*№?\s*\d{1,2})?\s*[:.)-]?)/gimu;
+  const hits = [...src.matchAll(re)].map(m => ({
+    start: m.index + m[0].indexOf(m[1]),
+  }));
   if (hits.length < 2) return [];
 
   const out = [];
   for (let i = 0; i < hits.length; i++) {
-    const start = hits[i].index;
-    const end = i + 1 < hits.length ? hits[i + 1].index : src.length;
+    const start = hits[i].start;
+    const end = i + 1 < hits.length ? hits[i + 1].start : src.length;
     const seg = v21CleanSegment(src.slice(start, end));
     if (seg) out.push(seg);
   }
@@ -94,7 +98,7 @@ function v21SplitMultiRequest(raw) {
   parts = parts
     .map(v21CleanSegment)
     .filter(x => x.length >= 8)
-    .map(x => /\bзапрос\b/iu.test(x) ? x : `Запрос ${x}`);
+    .map(x => /запрос/iu.test(x) ? x : `Запрос ${x}`);
 
   return parts.length >= 2 ? parts : [];
 }
@@ -102,9 +106,9 @@ function v21SplitMultiRequest(raw) {
 const __v21ParseObservedMessageBase = parseObservedMessage;
 parseObservedMessage = function requestMatchV21ParseObservedMessage(text) {
   const base = __v21ParseObservedMessageBase(text);
-  if (!(base?.kind === 'IGNORE' && base?.reason === 'MULTI_REQUEST_UNSPLIT')) return base;
-
   const parts = v21SplitMultiRequest(text);
+
+  // No strong split boundary: preserve V2 behavior exactly.
   if (parts.length < 2) return base;
 
   const parsedParts = parts.map((raw, index) => ({
@@ -189,6 +193,10 @@ function requestMatchV21SelfTest() {
   if (r.kind !== 'REQUEST' || !r.multiRequestV21 || r.subRequestsV21.length !== 2) {
     fail('anchor-split', JSON.stringify(r));
   }
+
+  o = parseObjectMessage(fake('2к квартира. ГМР. 55 м2. 7 700 000 руб. ремонт.'));
+  v = matchRequestToLiveObject(r, o);
+  if (!v.match || v.matchedSubRequestIndexV21 !== 2) fail('anchor-second-match', JSON.stringify(v));
 
   const single = parseObservedMessage('Запрос 1к ФМР до 6 млн');
   if (single.kind !== 'REQUEST' || single.multiRequestV21) fail('single-regression', JSON.stringify(single));
