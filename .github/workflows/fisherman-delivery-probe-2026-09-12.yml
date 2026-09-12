@@ -10,20 +10,27 @@ on:
 
 permissions:
   contents: read
+  issues: read
 
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 4
     env:
       MAX_BOOTSTRAP_SECRET: ${{ secrets.MAX_SESSION }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      GH_OWNER: ${{ github.repository_owner }}
+      GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Node 24
         uses: actions/setup-node@v7
         with:
           node-version: '24'
 
-      - name: Read-only user-session history probe
+      - name: Frozen Observer read-only delivery probe
         shell: bash
         run: |
           set -euo pipefail
@@ -32,107 +39,72 @@ jobs:
           npm init -y >/dev/null 2>&1
           npm install --silent --ignore-scripts --omit=optional --no-audit --no-fund webmaxsocket@1.2.7
 
-          node <<'NODE'
-          'use strict';
-          const { WebMaxClient } = require('webmaxsocket');
+          python3 - "$GITHUB_WORKSPACE/src/observer_base.yml" "$WORKDIR/observer.cjs" <<'PY'
+          from pathlib import Path
+          import sys
 
-          const RAW = String(process.env.MAX_BOOTSTRAP_SECRET || '').trim();
-          const TARGET_CHAT_ID = -70194328199322;
-          const EXPECTED_USER_ID = '140053596';
-          const WINDOW_START = Date.parse('2026-09-12T09:11:30Z');
-          const WINDOW_END = Date.parse('2026-09-12T09:14:30Z');
+          src = Path(sys.argv[1]).read_text(encoding='utf-8')
+          out = Path(sys.argv[2])
+          start_marker = "          cat > observer.cjs <<'JS'\n"
+          end_marker = "\n          JS\n"
+          if start_marker not in src or end_marker not in src:
+              raise SystemExit('OBSERVER_JS_BLOCK_NOT_FOUND')
+          start = src.index(start_marker) + len(start_marker)
+          end = src.index(end_marker, start)
+          js = src[start:end]
 
-          function bootstrapToken(raw) {
-            const s = String(raw || '').trim();
-            if (!s) return '';
-            try {
-              const x = JSON.parse(s);
-              if (typeof x === 'string') return x.trim();
-              for (const k of ['token','access_token','accessToken','auth_token','authToken']) {
-                if (typeof x?.[k] === 'string' && x[k].trim()) return x[k].trim();
+          replacements = [
+              ("const EXPECTED_USER_ID = '402668979';", "const EXPECTED_USER_ID = '140053596';"),
+              ("const TARGET_CHAT_ID = '-78471339098233';", "const TARGET_CHAT_ID = '-70194328199322';"),
+              ("const TARGET_CHAT_NAME_FALLBACK = 'СКАУТ ТЕСТ';", "const TARGET_CHAT_NAME_FALLBACK = 'Алексей: Западный обход/СМР/ЭНКА';"),
+              ("const HISTORY_BACKWARD = 500;", "const HISTORY_BACKWARD = 5000;"),
+          ]
+          for old, new in replacements:
+              if old not in js:
+                  raise SystemExit('PROBE_PATCH_MARKER_MISSING: ' + old)
+              js = js.replace(old, new, 1)
+
+          needle = """              const history = await client.getHistory(Number(cid), Date.now(), HISTORY_BACKWARD, 0);
+              if (!Array.isArray(history)) throw new Error('MAX_HISTORY_NOT_ARRAY');
+
+              const ordered = [...history].sort((a, b) => messageTime(a) - messageTime(b));"""
+          if needle not in js:
+              raise SystemExit('PROBE_HISTORY_INSERT_POINT_NOT_FOUND')
+
+          injected = """              const history = await client.getHistory(Number(cid), Date.now(), HISTORY_BACKWARD, 0);
+              if (!Array.isArray(history)) throw new Error('MAX_HISTORY_NOT_ARRAY');
+
+              const probeStart = Date.parse('2026-09-12T09:11:30Z');
+              const probeEnd = Date.parse('2026-09-12T09:14:30Z');
+              const toMs = value => {
+                const n = Number(value || 0);
+                return n > 0 && n < 10_000_000_000 ? n * 1000 : n;
+              };
+              const probeRows = history.filter(m => {
+                const t = toMs(messageTime(m));
+                return t >= probeStart && t <= probeEnd;
+              });
+              const probeMatches = probeRows.filter(m => {
+                const n = normalizeText(messageText(m));
+                return n.includes('жк италия') && n.includes('43 3');
+              });
+              console.log(`FISHERMAN DELIVERY PROBE: history=${history.length} inWindow=${probeRows.length} matches=${probeMatches.length}`);
+              for (const m of probeMatches.slice(0, 5)) {
+                const t = toMs(messageTime(m));
+                console.log(`FISHERMAN MATCH: id=${messageId(m)} iso=${t ? new Date(t).toISOString() : 'UNKNOWN'}`);
               }
-            } catch {}
-            return s;
-          }
+              console.log(probeMatches.length > 0
+                ? 'DELIVERY VERDICT: PRESENT — DO NOT RETRY'
+                : (probeRows.length > 0
+                    ? 'DELIVERY VERDICT: ABSENT_IN_READABLE_WINDOW'
+                    : 'DELIVERY VERDICT: INCONCLUSIVE_EMPTY_WINDOW'));
+              process.exit(0);
 
-          function textFromValue(value, depth = 0) {
-            if (typeof value === 'string') return value;
-            if (!value || typeof value !== 'object' || depth > 4) return '';
-            for (const key of ['text','message','caption','body','content']) {
-              const nested = value[key];
-              if (typeof nested === 'string' && nested.trim()) return nested;
-              if (nested && typeof nested === 'object') {
-                const found = textFromValue(nested, depth + 1);
-                if (found) return found;
-              }
-            }
-            return '';
-          }
+              const ordered = [...history].sort((a, b) => messageTime(a) - messageTime(b));"""
+          js = js.replace(needle, injected, 1)
+          out.write_text(js, encoding='utf-8')
+          print('FROZEN OBSERVER PROBE BUILD: PASS')
+          PY
 
-          function messageText(m) {
-            return textFromValue(m?.text) || textFromValue(m?.rawData?.text) ||
-              textFromValue(m?.rawData?.link?.message?.text) ||
-              textFromValue(m?.rawData?.message) || textFromValue(m?.rawData);
-          }
-
-          function messageTime(m) {
-            const n = Number(m?.timestamp ?? m?.rawData?.time ?? m?.time ?? 0);
-            if (!Number.isFinite(n) || n <= 0) return 0;
-            return n < 10_000_000_000 ? n * 1000 : n;
-          }
-
-          function norm(s) {
-            return String(s || '').toLowerCase().replace(/ё/g,'е').replace(/[^a-zа-я0-9]+/giu,' ').trim();
-          }
-
-          (async () => {
-            const token = bootstrapToken(RAW);
-            if (!token) throw new Error('MAX_SESSION_TOKEN_EMPTY');
-
-            const client = new WebMaxClient({
-              name: 'philippov_fisherman_delivery_probe',
-              token,
-              deviceType: 'WEB',
-              saveToken: false,
-              clearSessionOnFailedSync: false,
-              maxReconnectAttempts: 0,
-              reconnectDelay: 1000,
-              timezone: 'Europe/Moscow',
-            });
-
-            await client.start();
-            const actualUserId = String(client?.me?.id ?? client?.session?.get?.('userId') ?? 'UNKNOWN');
-            if (actualUserId !== EXPECTED_USER_ID) throw new Error(`WRONG_MAX_ACCOUNT expected=${EXPECTED_USER_ID} got=${actualUserId}`);
-            console.log(`USER SESSION: PASS user_id=${actualUserId}`);
-
-            const history = await client.getHistory(TARGET_CHAT_ID, Date.now(), 1000, 0);
-            if (!Array.isArray(history)) throw new Error('MAX_HISTORY_NOT_ARRAY');
-
-            const inWindow = history.filter(m => {
-              const t = messageTime(m);
-              return t >= WINDOW_START && t <= WINDOW_END;
-            });
-            const matches = inWindow.filter(m => {
-              const n = norm(messageText(m));
-              return n.includes('жк италия') && n.includes('43 3');
-            });
-
-            console.log(`USER HISTORY: PASS total=${history.length} inWindow=${inWindow.length}`);
-            console.log(`CURRENT #13 MATCHES: ${matches.length}`);
-            for (const m of matches.slice(0,5)) {
-              const t = messageTime(m);
-              const id = String(m?.id ?? m?.rawData?.id ?? m?.messageId ?? 'unknown');
-              console.log(`MATCH id=${id} iso=${t ? new Date(t).toISOString() : 'unknown'}`);
-            }
-            console.log(matches.length > 0
-              ? 'DELIVERY VERDICT: PRESENT — DO NOT RETRY'
-              : (inWindow.length > 0
-                  ? 'DELIVERY VERDICT: ABSENT_IN_READABLE_WINDOW'
-                  : 'DELIVERY VERDICT: INCONCLUSIVE_EMPTY_WINDOW'));
-            process.exit(0);
-          })().catch(e => {
-            console.error(`PROBE ERROR: ${e?.message || e}`);
-            if (e?.cause) console.error(`PROBE CAUSE: ${JSON.stringify({name:e.cause.name,code:e.cause.code,errno:e.cause.errno,syscall:e.cause.syscall,address:e.cause.address,port:e.cause.port})}`);
-            process.exit(1);
-          });
-          NODE
+          node --check observer.cjs
+          node observer.cjs
