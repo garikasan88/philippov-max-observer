@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - '.github/workflows/request_match_v2_shadow.yml'
+      - 'src/request_match_v2_patch.js'
+      - 'src/request_match_v2_hotfix.js'
   workflow_dispatch: {}
 
 permissions:
