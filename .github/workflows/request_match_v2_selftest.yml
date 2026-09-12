@@ -105,21 +105,38 @@ jobs:
               "clip(matchView.raw || req.raw, 850)",
               "m.reasons.filter(x => !/^SUBREQUEST:\\d+$/u.test(String(x || '').trim()))",
               "const matchKey = `${cid}|${m.requestMessageId}|${m.objectId}`;",
-              "nextActionCreate({sourceMatchKey: matchKey, requestAuthor})",
+              "nextActionCreate({sourceMatchKey: matchKey})",
+              "const nextActionDisplayText = requestAuthor",
               "cursor.nextActions[nextAction.id] = nextAction",
               "cursor.nextActionEvents.push({type:'CREATED'",
+              "cursor.auditEvents.push({type:'NEXT_ACTION_CREATED'",
+              "const controlSenderId = senderId(cm);",
+              "controlSenderId === EXPECTED_USER_ID",
               "nextActionParseCommand(controlText)",
               "nextActionApplyCommand(cursor.nextActions, controlText",
               "cursor.nextActionEvents.push({type:'STATUS_CHANGED'",
+              "cursor.auditEvents.push({type:'NEXT_ACTION_STATUS_CHANGED'",
               "`ID: ${nextAction.id}`",
               "`Статус: ${nextAction.status}`",
               "`Управление: СКАУТ ${nextAction.id} В РАБОТУ / ГОТОВО / ОТКЛОНИТЬ`",
+              "const MAX_NEW_MATCH_NOTIFICATIONS_PER_RUN = 20;",
+              "MATCH NOTIFY FLOOD GUARD: BLOCKED",
+              "type:'MATCH_NOTIFIED'",
+              "MATCH NOTIFY CHECKPOINT: PASS",
               "const encryptedMatches = encryptSession(notifyMatches, BOOTSTRAP_RAW);",
               "const key = matchKey;",
           ]
           missing = [needle for needle in required if needle not in effective]
           if missing:
-              raise SystemExit('PRODUCTION_NEXT_ACTION_LIFECYCLE_WIRING_MISSING: ' + repr(missing))
+              raise SystemExit('PRODUCTION_NEXT_ACTION_HARDENING_MISSING: ' + repr(missing))
+
+          forbidden = [
+              "nextActionCreate({sourceMatchKey: matchKey, requestAuthor})",
+              "text: requestAuthor\n",
+          ]
+          leaked = [needle for needle in forbidden if needle in effective]
+          if leaked:
+              raise SystemExit('PUBLIC_STATE_PRIVACY_REGRESSION: ' + repr(leaked))
 
           active = Path('.github/workflows/max_observer_production.yml').read_text(encoding='utf-8')
           active_required = [
@@ -131,5 +148,5 @@ jobs:
           if missing_active:
               raise SystemExit('ACTIVE_PRODUCTION_OVERLAY_WIRING_MISSING: ' + repr(missing_active))
 
-          print('PRODUCTION MATCH VIEW + NEXT ACTION LIFECYCLE WIRING: PASS')
+          print('PRODUCTION MATCH + NEXT ACTION PRIVACY/AUDIT/DELIVERY HARDENING: PASS')
           PY
