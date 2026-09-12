@@ -165,6 +165,54 @@ matchRequestToLiveObject = function requestMatchV21Match(req, obj) {
   };
 };
 
+// Resolve the exact request fragment that produced a V2.1 match.
+// For ordinary single requests this is a no-op. For multi-request containers,
+// resolution is based only on the explicit SUBREQUEST:N marker emitted by the
+// matcher. If that marker cannot be resolved, fall back to the full container
+// rather than guessing a fragment.
+function v21MatchedRequestView(request, reasons = []) {
+  const fallbackRaw = String(request?.raw || '').trim();
+  const fallback = {
+    request,
+    raw: fallbackRaw,
+    index: null,
+    total: null,
+    isMulti: Boolean(request?.multiRequestV21),
+  };
+
+  if (!request?.multiRequestV21 || !Array.isArray(request.subRequestsV21)) {
+    return fallback;
+  }
+
+  const marker = Array.isArray(reasons)
+    ? reasons.find(x => /^SUBREQUEST:\d+$/u.test(String(x || '').trim()))
+    : null;
+  const match = marker ? String(marker).match(/^SUBREQUEST:(\d+)$/u) : null;
+  const index = match ? Number(match[1]) : NaN;
+  if (!Number.isInteger(index) || index < 1) {
+    return {
+      ...fallback,
+      total: Number(request.splitTotalV21) || request.subRequestsV21.length,
+    };
+  }
+
+  const row = request.subRequestsV21.find(x => Number(x?.index) === index);
+  if (!row?.parsed || row.parsed.kind !== 'REQUEST') {
+    return {
+      ...fallback,
+      total: Number(request.splitTotalV21) || request.subRequestsV21.length,
+    };
+  }
+
+  return {
+    request: row.parsed,
+    raw: String(row.raw || row.parsed.raw || '').trim(),
+    index,
+    total: Number(request.splitTotalV21) || request.subRequestsV21.length,
+    isMulti: true,
+  };
+}
+
 function requestMatchV21SelfTest() {
   const fail = (name, detail = '') => {
     throw new Error(`REQUEST MATCH V2.1 SELFTEST ${name}${detail ? ': ' + detail : ''}`);
@@ -200,10 +248,20 @@ function requestMatchV21SelfTest() {
   v = matchRequestToLiveObject(r, o);
   if (!v.match || v.matchedSubRequestIndexV21 !== 2) fail('anchor-second-match', JSON.stringify(v));
 
+  const view = v21MatchedRequestView(r, v.reasons);
+  if (view.index !== 2 || view.total !== 2 || !/2к\s+гмр/iu.test(normalizeText(view.raw))) {
+    fail('matched-request-view', JSON.stringify(view));
+  }
+  if (/1к\s+фмр/iu.test(normalizeText(view.raw))) {
+    fail('matched-request-view-leak', JSON.stringify(view));
+  }
+
   const single = parseObservedMessage('Запрос 1к ФМР до 6 млн');
   if (single.kind !== 'REQUEST' || single.multiRequestV21) fail('single-regression', JSON.stringify(single));
+  const singleView = v21MatchedRequestView(single, ['TYPE', 'GEO']);
+  if (singleView.index !== null || singleView.raw !== single.raw) fail('single-view-regression', JSON.stringify(singleView));
 
-  return 'REQUEST_MATCH_V21_MULTI_SPLIT_PASS';
+  return 'REQUEST_MATCH_V21_MULTI_SPLIT_PASS / V21_MATCH_VIEW_PASS';
 }
 
 const __v21ParserSelfTestBase = parserSelfTest;
