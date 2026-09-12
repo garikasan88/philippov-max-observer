@@ -1,0 +1,183 @@
+name: PHILIPPOV MAX — encrypted group ID export 2026-09-12
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/max_group_id_export_2026_09_12.yml'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      MAX_BOOTSTRAP_SECRET: ${{ secrets.MAX_SESSION }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      GH_OWNER: ${{ github.repository_owner }}
+      GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Build and run read-only encrypted exporter
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKDIR="$(mktemp -d)"
+          cd "$WORKDIR"
+          npm init -y >/dev/null 2>&1
+          npm install --silent --ignore-scripts --omit=optional --no-audit --no-fund webmaxsocket@1.2.7
+
+          python3 - "$GITHUB_WORKSPACE/src/observer_base.yml" "$WORKDIR/exporter.cjs" <<'PY'
+          from pathlib import Path
+          import sys
+
+          src = Path(sys.argv[1]).read_text(encoding='utf-8')
+          out = Path(sys.argv[2])
+          start_marker = "          cat > observer.cjs <<'JS'\n"
+          end_marker = "\n          JS\n"
+          if start_marker not in src or end_marker not in src:
+              raise SystemExit('OBSERVER_JS_BLOCK_NOT_FOUND')
+          start = src.index(start_marker) + len(start_marker)
+          end = src.index(end_marker, start)
+          js = src[start:end]
+
+          old_uid = "const EXPECTED_USER_ID = '402668979';"
+          new_uid = "const EXPECTED_USER_ID = '140053596';"
+          if old_uid not in js:
+              raise SystemExit('EXPECTED_USER_PATCH_MARKER_NOT_FOUND')
+          js = js.replace(old_uid, new_uid, 1)
+
+          marker = "              console.log('SESSION CHECKPOINT AFTER LOGIN: PASS');"
+          if marker not in js:
+              raise SystemExit('SESSION_CHECKPOINT_MARKER_NOT_FOUND')
+
+          inject = r'''
+
+              const collected = new Map();
+              const addRows = (rows, source) => {
+                if (!Array.isArray(rows)) return 0;
+                let added = 0;
+                for (const c of rows) {
+                  const idRaw = c?.id ?? c?.chat_id ?? c?.chatId ?? null;
+                  if (idRaw == null) continue;
+                  const id = String(idRaw);
+                  if (collected.has(id)) continue;
+                  const row = {
+                    id,
+                    title: String(c?.title ?? c?.name ?? c?.displayName ?? '').trim(),
+                    type: String(c?.type ?? c?.chatType ?? c?.chat_type ?? '').trim(),
+                    status: String(c?.status ?? c?.membershipStatus ?? c?.membership_status ?? '').trim(),
+                    participantsCount: Number(c?.participantsCount ?? c?.participants_count ?? c?.membersCount ?? c?.members_count ?? 0) || null,
+                    source,
+                  };
+                  collected.set(id, row);
+                  added++;
+                }
+                return added;
+              };
+
+              addRows(Array.isArray(client?.lastSyncPayload?.chats) ? client.lastSyncPayload.chats : [], 'sync');
+
+              let offset = 0;
+              for (let page = 0; page < 20; page++) {
+                const got = await client.getChats(200, offset);
+                let rows = [];
+                if (Array.isArray(got)) rows = got;
+                else if (Array.isArray(got?.chats)) rows = got.chats;
+                else if (Array.isArray(got?.payload?.chats)) rows = got.payload.chats;
+
+                const before = collected.size;
+                const added = addRows(rows, 'getChats');
+                console.log(`GROUP EXPORT PAGE ${page + 1}: rows=${rows.length} added=${added} total=${collected.size}`);
+
+                if (!rows.length || rows.length < 200) break;
+                if (collected.size === before) break;
+                offset += rows.length;
+              }
+
+              const allChats = [...collected.values()].sort((a, b) =>
+                a.title.localeCompare(b.title, 'ru') || a.id.localeCompare(b.id)
+              );
+              const groups = allChats.filter(x => /^-\d+$/.test(x.id));
+
+              const exportPayload = {
+                schema: 'PHILIPPOV_MAX_GROUP_EXPORT_V1',
+                exportedAt: new Date().toISOString(),
+                accountUserId: String(actualUserId),
+                accountName: String(actualName || ''),
+                allChatsCount: allChats.length,
+                groupCandidatesCount: groups.length,
+                groupCandidateRule: 'negative native MAX chat id',
+                groups,
+              };
+
+              const exportPublicKey = `-----BEGIN PUBLIC KEY-----
+MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAuQ0xnMgPvRZMqfvrr2/b
+nNr9+vt1rKSO03G+AGDsWuC5sHY8TtqMmXnnz0l/f3N4IXySqrLCF1CiJHWQS0jK
+MyI3bBAzTNJzHyuDYEzHVbxMJYtOnQZujZWCCott/hySYcqFcNPoGg/yW2RIL5n8
+wpU80t7BZSfwFhAXq31izH+Ltd2M45Kv6chNeySRaDvbacuBQ8tLJvR+DdmxeALL
+mpQBfkASOBbFRBsu1Rulf/i1HPAPtEWUREqtY6jJ98imilrfpSIA4w3QgfacG4g+
+aYQyDxcH9VQjEtQwZavoQHr/Nt1Ud9CUHZ7h2IPM2/kH7aIDvsuNy/XdISnsw3Le
++egffzAx7dn3KBeQWaT+THJ7coCdJdrXobsD5f/rXhiLdxYoSEvqvgHfxms4nvN3
+rLjHREUM2M8VOS2y/VhlckyYYvQirSuUJYMvaIva4j07eIS5L1DJLIGcyO0VKEYi
+fYqqASmFiFKQZ9AB3VDgRsdRJhIIlgkPghvF8iGUeiXNAgMBAAE=
+-----END PUBLIC KEY-----`;
+
+              const plain = Buffer.from(JSON.stringify(exportPayload), 'utf8');
+              const aesKey = crypto.randomBytes(32);
+              const iv = crypto.randomBytes(12);
+              const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
+              const ciphertext = Buffer.concat([cipher.update(plain), cipher.final()]);
+              const tag = cipher.getAuthTag();
+              const wrappedKey = crypto.publicEncrypt({
+                key: exportPublicKey,
+                padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+                oaepHash: 'sha256',
+              }, aesKey);
+
+              const envelope = {
+                schema: 'PHILIPPOV_ENCRYPTED_EXPORT_V1',
+                algorithm: 'RSA-OAEP-SHA256 + AES-256-GCM',
+                wrappedKey: wrappedKey.toString('base64'),
+                iv: iv.toString('base64'),
+                tag: tag.toString('base64'),
+                ciphertext: ciphertext.toString('base64'),
+                counts: {
+                  allChats: allChats.length,
+                  groupCandidates: groups.length,
+                },
+              };
+              fs.writeFileSync('max-groups.envelope.json', JSON.stringify(envelope), 'utf8');
+              console.log(`GROUP EXPORT COMPLETE: allChats=${allChats.length} groupCandidates=${groups.length}`);
+              process.exit(0);
+          '''
+
+          js = js.replace(marker, marker + inject, 1)
+          out.write_text(js, encoding='utf-8')
+          print('ENCRYPTED GROUP EXPORT BUILD: PASS')
+          PY
+
+          node --check exporter.cjs
+          node exporter.cjs
+          test -s max-groups.envelope.json
+          mkdir -p "$GITHUB_WORKSPACE/.export"
+          mv max-groups.envelope.json "$GITHUB_WORKSPACE/.export/max-groups.envelope.json"
+
+      - name: Upload encrypted export only
+        uses: actions/upload-artifact@v4
+        with:
+          name: max-groups-export-encrypted
+          path: .export/max-groups.envelope.json
+          if-no-files-found: error
+          retention-days: 1
