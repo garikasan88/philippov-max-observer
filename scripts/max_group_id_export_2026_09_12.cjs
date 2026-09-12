@@ -65,21 +65,67 @@ const injection = `
                 return added;
               };
 
-              addRows(Array.isArray(client?.lastSyncPayload?.chats) ? client.lastSyncPayload.chats : [], 'sync');
+              const paginationScalars = obj => {
+                const out = {};
+                if (!obj || typeof obj !== 'object') return out;
+                for (const [k, v] of Object.entries(obj)) {
+                  if (!/(marker|cursor|offset|next|more|count|total|has)/i.test(k)) continue;
+                  if (v == null || typeof v === 'number' || typeof v === 'boolean') out[k] = v;
+                  else if (typeof v === 'string') out[k] = {type:'string', length:v.length};
+                }
+                return out;
+              };
 
-              let exportOffset = 0;
-              for (let exportPage = 0; exportPage < 20; exportPage++) {
-                const got = await client.getChats(200, exportOffset);
-                let rows = [];
-                if (Array.isArray(got)) rows = got;
-                else if (Array.isArray(got?.chats)) rows = got.chats;
-                else if (Array.isArray(got?.payload?.chats)) rows = got.payload.chats;
-                const before = collected.size;
-                const added = addRows(rows, 'getChats');
-                console.log('GROUP EXPORT PAGE ' + (exportPage + 1) + ': rows=' + rows.length + ' added=' + added + ' total=' + collected.size);
-                if (!rows.length || rows.length < 200) break;
-                if (collected.size === before) break;
-                exportOffset += rows.length;
+              const syncPayload = client?.lastSyncPayload && typeof client.lastSyncPayload === 'object'
+                ? client.lastSyncPayload
+                : {};
+              const syncRows = Array.isArray(syncPayload?.chats) ? syncPayload.chats : [];
+              addRows(syncRows, 'sync');
+              console.log('SYNC SHAPE: keys=' + JSON.stringify(Object.keys(syncPayload).sort()) + ' chats=' + syncRows.length + ' pagination=' + JSON.stringify(paginationScalars(syncPayload)));
+
+              const markerCandidates = obj => {
+                if (!obj || typeof obj !== 'object') return [];
+                const keys = ['nextMarker','next_marker','marker','nextCursor','next_cursor','cursor','offset','nextOffset','next_offset'];
+                const vals = [];
+                for (const k of keys) {
+                  const v = obj[k];
+                  if (v === undefined || v === null || v === '') continue;
+                  vals.push({key:k, value:v});
+                }
+                return vals;
+              };
+
+              let marker = 0;
+              const seenMarkers = new Set();
+              for (let page = 0; page < 30; page++) {
+                const markerKey = typeof marker + ':' + String(marker);
+                if (seenMarkers.has(markerKey)) {
+                  console.log('RAW CHATS STOP: repeated marker type=' + typeof marker);
+                  break;
+                }
+                seenMarkers.add(markerKey);
+
+                const response = await client.sendAndWait(53, {marker});
+                const payload = response?.payload && typeof response.payload === 'object' ? response.payload : {};
+                const rows = Array.isArray(payload?.chats) ? payload.chats : [];
+                const added = addRows(rows, 'raw_chats_list');
+                const candidates = markerCandidates(payload);
+                console.log('RAW CHATS PAGE ' + (page + 1) + ': rows=' + rows.length + ' added=' + added + ' total=' + collected.size + ' keys=' + JSON.stringify(Object.keys(payload).sort()) + ' pagination=' + JSON.stringify(paginationScalars(payload)) + ' candidateKeys=' + JSON.stringify(candidates.map(x => x.key)));
+
+                if (!rows.length) break;
+                let next = null;
+                for (const item of candidates) {
+                  const v = item.value;
+                  if ((typeof v === 'number' || typeof v === 'string') && String(v) !== String(marker)) {
+                    next = v;
+                    break;
+                  }
+                }
+                if (next == null) {
+                  console.log('RAW CHATS STOP: no distinct next marker');
+                  break;
+                }
+                marker = next;
               }
 
               const allChats = [...collected.values()].sort((a, b) =>
