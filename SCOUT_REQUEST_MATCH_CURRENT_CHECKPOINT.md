@@ -1,7 +1,18 @@
 # PHILIPPOV SCOUT — REQUEST / MATCH CURRENT CHECKPOINT
 
-DATE: 2026-09-12
-STATUS: PASS for current Request/MATCH V2.1 + NextAction hardening scope
+DATE: 2026-09-14
+STATUS: PASS for Request/MATCH V2.1 real-request hardening in self-test + isolated live shadow
+
+## WHY THE 2026-09-12 PASS WAS REOPENED
+
+Fresh production evidence on 2026-09-14 exposed false-positive MATCH behavior:
+
+- unknown named geography could silently widen instead of failing closed;
+- `Дом от 4 соток` was not reliably enforced as a land-area hard constraint;
+- address corpus notation such as `92к2` could pollute room type and make a studio look like `2k`;
+- the same realtor request reposted in multiple observed groups could create duplicate MATCH/NextAction identities.
+
+This is valid new evidence, so the earlier PASS was reopened only for the defective Request/MATCH scope. Existing NextAction hardening and unrelated Observer architecture were preserved.
 
 ## CURRENT PRODUCTION SCOPE
 
@@ -17,39 +28,53 @@ Current MAX request groups:
 Object source:
 
 - Мои объекты — stable chat_id `-75607874388089`
-- latest confirmed live production source: 40 messages / 35 parsed objects
+- latest confirmed isolated live-shadow source: 40 messages / 35 parsed objects
 
 Sensor account checkpoint:
 
 - user_id `140053596`
 
-## PRODUCTION CODE HARDENING
+## REAL-REQUEST BUSINESS RULES CONFIRMED 2026-09-14
 
-Canonical hardening commits:
+- `первая цена / первые цены` → IGNORE for now; these are treated as reseller/buyout demand outside the target workflow.
+- `маленькие не предлагать` for studio → operational minimum `25 m²`; this is a working market-derived threshold, not a permanent ontology constant.
+- `приоритет до X, дороже тоже рассмотрим` → temporary hard ceiling `X + 300 000 ₽`.
+- `шикарная / красивая / адекватный ремонт` → interpreted as designer renovation; generic `ремонт / мебель / техника` does not prove this and therefore fails closed.
+- same person can repost the same request in multiple request groups; cross-group semantic dedup is required. Current rule suppresses same-day semantic duplicates for the same object while allowing a repeat on a later day to become a new request.
 
-- `f4f3e73f9c87bc0bd45ae0e682aa6b68e61c8bfb` — NextAction privacy, audit and delivery hardening
-- `afce0688b8db744f38300c8084225cc6a50f4be8` — regression/self-test coverage for hardening
+## V2.1 REAL-REQUEST HARDENING
 
-Implemented and verified:
+Current head used by the final verified self-test/live shadow:
 
-- Request/MATCH V2 high-precision hard constraints
-- GEO fail-closed behavior
-- V2.1 explicit multi-request split
-- exact matched subrequest view
-- stable NextAction IDs (`NA-XXXXXXXX`)
-- lifecycle: OPEN → IN_PROGRESS → DONE / REJECTED, explicit reopen to OPEN
-- strict control-command parsing
-- control self-filter: sensor's own outgoing MAX messages cannot execute lifecycle commands
-- persisted NextAction state does not store the realtor/request-author name; author name remains display-only in the direct notification
-- Audit/Event records for NextAction creation/status changes and MATCH delivery
-- notification flood guard: more than 20 undeduplicated new MATCH notifications in one run is blocked fail-closed
-- per-delivery state checkpoint after each successful MATCH notification, reducing duplicate risk after a later partial-run failure
+`34bdeee3a523ea84603a5e702182c3a2257b727e`
 
-## VERIFIED RUNS
+Added/wired:
 
-### Self-test
+- `src/request_match_v21_real_requests_hotfix.js`
+- `src/request_match_v21_regex_fix.js`
+- `src/request_match_v21_production_overlay.py`
 
-Run `34688553869` — SUCCESS
+Implemented:
+
+- exact named aliases for current real-request evidence: `Сказка Град`, `КП Крепость`;
+- unknown named geography fails closed instead of becoming `GEO=NONE`;
+- `Дом от 4 соток` parses and enforces `land.min=4`;
+- object land area is extracted and checked as HARD; unknown land area cannot satisfy an explicit land minimum;
+- `92к2` / corpus notation is removed from room-type classification so it cannot create a false `2k` type;
+- studio `маленькие не предлагать` applies `area.min=25`;
+- first-price requests are ignored with `FIRST_PRICE_RESELLER_IGNORE`;
+- priority budget widening is limited to `+300 000 ₽`;
+- designer-renovation language is HARD and generic repair does not satisfy it;
+- `не первая очередь` is HARD and fails closed if phase is unconfirmed;
+- explicit `214-ФЗ` is HARD and fails closed if the object does not confirm it;
+- cross-group semantic MATCH key uses normalized matched request + phone/author identity + calendar day + object ID;
+- legacy group/message/object dedup keys are retained alongside new semantic keys for backward compatibility.
+
+## REGRESSION SELF-TEST
+
+Workflow run: `34875610795`
+Job: `104081922466`
+Conclusion: SUCCESS
 
 Confirmed:
 
@@ -61,78 +86,117 @@ Confirmed:
 - `MVP_SCOPE_FILTER_PASS`
 - `OBJECT_MATCH_DRY_PASS`
 - `OBJECT_TYPE_BROAD_PASS`
+- `REQUEST_MATCH_V21_REAL_REQUESTS_PASS`
 - `NEXT_ACTION_LIFECYCLE_PASS`
-- `PRODUCTION MATCH + NEXT ACTION PRIVACY/AUDIT/DELIVERY HARDENING: PASS`
+- `REQUEST MATCH V2/V2.1 ONE-SHOT: PASS`
+- `PRODUCTION MATCH + V2.1 REAL REQUEST + NEXT ACTION HARDENING: PASS`
 
-### Isolated live shadow
+The real-request regression set explicitly checks:
 
-Run `34688812440` — SUCCESS
+- first-price ignore;
+- exact `Сказка Град` without citywide widening;
+- `КП Крепость` + land minimum 4 sot;
+- 3-sot rejection and 4.5-sot acceptance;
+- `92к2` studio does not become `2k`;
+- studio 21 m² rejected and 26 m² accepted for `маленькие не предлагать`;
+- generic repair rejected where designer repair was requested;
+- explicit designer repair accepted;
+- priority 3.5m allows 3.75m but rejects 3.85m under the temporary +300k rule;
+- same-day same semantic request across different groups deduplicates;
+- next-day repeat remains a new request.
 
-Group ЗАПРОСЫ:
+## ISOLATED LIVE SHADOW
 
-- 40 source messages / 35 parsed objects
-- 5 current requests
-- 0 MATCH
-- reject counts included TYPE_MISS, GEO_MISS, TYPE_EXCLUDED, COMPLEX_MISS and OFF_MARKET_UNCONFIRMED
+Workflow run: `34875610798`
+Job: `104081923311`
+Conclusion: SUCCESS
 
-Group Запросы Краснодар:
+### Group ЗАПРОСЫ
 
-- 40 source messages / 35 parsed objects
-- 11 current requests
-- 0 MATCH
-- reject counts included GEO_MISS, TYPE_MISS, PRICE_MISS, OFF_MARKET_UNCONFIRMED, TYPE_EXCLUDED, COMPLEX_MISS and GEO_UNRESOLVED_FAIL_CLOSED
+- MAX login PASS as Светлана, user_id `140053596`;
+- object source: 40 messages / 35 parsed objects;
+- within 24h: 6 current requests;
+- `FIRST_PRICE_RESELLER_IGNORE`: 2;
+- `BUYOUT_MESSAGE`: 1;
+- live MATCH: 0;
+- reject counts: `COMPLEX_MISS=32`, `TYPE_MISS=163`, `PRICE_MISS=2`, `GEO_MISS=13`.
 
-Both groups: FINAL PASS.
+### Group Запросы Краснодар
 
-### Production
+- MAX login PASS as Светлана, user_id `140053596`;
+- object source: 40 messages / 35 parsed objects;
+- within 24h: 15 current requests;
+- `FIRST_PRICE_RESELLER_IGNORE`: 2;
+- `MULTI_REQUEST_SPLIT_V21`: 1;
+- live MATCH: 0;
+- reject counts include:
+  - `TYPE_MISS=383`;
+  - `GEO_UNRESOLVED_FAIL_CLOSED=35`;
+  - `MULTI_REQUEST_NO_MATCH=35`;
+  - `COMPLEX_MISS=32`;
+  - `PRICE_MISS=7`;
+  - `AREA_MIN_MISS=1`;
+  - `GEO_MISS=32`.
 
-Run `34688638463` — SUCCESS
+Both groups completed successfully. Shadow mode made no MATCH notifications.
 
-Confirmed:
+## PRODUCTION SAFETY DURING HARDENING
 
-- NextAction lifecycle overlay loaded
-- production V2 variant syntax PASS
-- MAX login PASS
-- object source: 40 messages / 35 objects
-- ЗАПРОСЫ: 5 current requests, 0 live MATCH
-- Запросы Краснодар: 11 current requests, 0 live MATCH
-- no new notifications sent because current high-precision matching produced no qualifying candidates
-- both production groups FINAL PASS
-- production sensor COMPLETE
+A production run occurred during development before the final regex fixes:
 
-## STATE / PRIVACY CHECK
+- run `34875191619`;
+- job `104080525673`;
+- conclusion SUCCESS;
+- both request groups produced `live=0`, `new=0`, `send=0`;
+- remembered dedup keys: 121.
 
-Current state issue:
+Therefore the intermediate defective revisions did not emit a false MATCH notification during that run.
 
-`[STATE] PHILIPPOV MAX OBSERVER V2 FINAL`
+Production workflow is wired to apply:
 
-Confirmed after validation:
+1. existing NextAction lifecycle overlay;
+2. V2.1 real-request production overlay;
+3. real-request JS hardening + Cyrillic-safe regex fixes.
 
-- `nextActions: {}`
-- `nextActionEvents: []`
-- `auditEvents: []`
-- `matchFloodGuardSignatures: {}`
+Static production-wiring verification is PASS.
 
-No new real MATCH occurred during the validation runs, therefore there was no new persisted NextAction or lifecycle event to inspect from a natural production event.
+## EXISTING NEXTACTION HARDENING PRESERVED
+
+Still preserved without regression:
+
+- stable NextAction IDs (`NA-XXXXXXXX`);
+- lifecycle: OPEN → IN_PROGRESS → DONE / REJECTED, explicit reopen to OPEN;
+- strict control-command parsing;
+- control self-filter;
+- persisted privacy rule: realtor/request-author name remains display-only and is not stored inside persisted NextAction state;
+- Audit/Event creation/status-change records;
+- notification flood guard;
+- per-delivery state checkpointing.
 
 ## LIMITS / UNKNOWN
 
-NOT YET ESTABLISHED end-to-end on a natural live event:
+Final production execution at head `34bdeee3a523ea84603a5e702182c3a2257b727e` is NOT YET ESTABLISHED.
+
+Therefore do not claim a final natural production-event PASS for this head until the production sensor actually runs that revision.
+
+Also still NOT YET ESTABLISHED end-to-end on a genuine new natural MATCH:
 
 Real new MATCH → real NextAction → Igor sends lifecycle command in MAX → state transition → confirmation back in MAX.
 
-The command/state code and production wiring are PASS, but no genuine new qualifying MATCH occurred during the validation window.
+Delivery is not claimed to be mathematically exactly-once.
 
-Delivery is not claimed to be mathematically exactly-once. Per-delivery state checkpointing materially reduces duplicate risk, but MAX send and state persistence are not one atomic transaction.
-
-The earlier concurrent shadow/production validation that returned zero histories is not used as the current live-data checkpoint. The isolated shadow run `34688812440` is the canonical live-shadow evidence.
-
-## CLEANUP
-
-Temporary one-shot validation workflow removed after verification.
+`25 m²` for `маленькие не предлагать` is an operational working threshold and may be revised from future realtor feedback/evidence.
 
 ## CURRENT VERDICT
 
-REQUEST/MATCH V2.1 + NextAction hardening: PASS
+REQUEST/MATCH V2.1 REAL-REQUEST HARDENING:
 
-Do not reopen this checkpoint without new evidence, a detected defect, an external change, or an explicit decision.
+PASS — REGRESSION SELF-TEST
+PASS — ISOLATED LIVE SHADOW
+PASS — PRODUCTION WIRING
+
+FINAL NATURAL PRODUCTION EVENT ON CURRENT HEAD:
+
+НЕ УСТАНОВЛЕНО
+
+Do not reopen the passed hardening scope without new evidence, a detected defect, an external change, or an explicit decision.
