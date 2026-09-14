@@ -8,6 +8,7 @@ on:
       - 'src/request_match_v2_patch.js'
       - 'src/request_match_v2_hotfix.js'
       - 'src/request_match_v21_real_requests_hotfix.js'
+      - 'src/request_match_v21_regex_fix.js'
       - 'src/request_match_v21_production_overlay.py'
       - 'src/max_observer_production_base.yml'
       - 'src/next_action_lifecycle_overlay.py'
@@ -47,6 +48,7 @@ jobs:
           patch = Path('src/request_match_v2_patch.js').read_text(encoding='utf-8')
           hotfix = Path('src/request_match_v2_hotfix.js').read_text(encoding='utf-8')
           real_hotfix = Path('src/request_match_v21_real_requests_hotfix.js').read_text(encoding='utf-8')
+          regex_fix = Path('src/request_match_v21_regex_fix.js').read_text(encoding='utf-8')
           start_marker = "cat > observer.cjs <<'JS'\n"
           end_marker = "\n          JS\n"
           if start_marker not in src or end_marker not in src:
@@ -59,7 +61,7 @@ jobs:
           main_marker = "\n          async function main() {"
           if main_marker not in js:
               raise SystemExit('MAIN_INSERT_POINT_NOT_FOUND')
-          js = js.replace(main_marker, "\n" + patch + "\n" + hotfix + "\n" + real_hotfix + "\n" + main_marker, 1)
+          js = js.replace(main_marker, "\n" + patch + "\n" + hotfix + "\n" + real_hotfix + "\n" + regex_fix + "\n" + main_marker, 1)
 
           invoke_marker = "\n          main().catch(error => {"
           invoke = js.rfind(invoke_marker)
@@ -114,6 +116,7 @@ jobs:
 
           required = [
               "request_match_v21_real_requests_hotfix.js",
+              "request_match_v21_regex_fix.js",
               "const matchView = v21MatchedRequestView(m.request || {}, m.reasons || []);",
               "`Подзапрос: ${matchView.index} из ${matchView.total || '?'}`",
               "clip(matchView.raw || req.raw, 850)",
