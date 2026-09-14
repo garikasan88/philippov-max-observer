@@ -17,6 +17,9 @@ v21LandFromHousePhrase = function v21LandFromHousePhraseCyrillicSafe(raw) {
   return Number.isFinite(v) ? v : null;
 };
 
+// For room-type classification only, erase address corpus tokens completely.
+// Keeping "92 корпус 2" is unsafe because the frozen request regex can read
+// the trailing 2 in 92 + the first letter of "корпус" as the shorthand "2к".
 v21MaskCorpusNumbers = function v21MaskCorpusNumbersSafe(raw) {
-  return String(raw || '').replace(/(\d{1,3})\s*к\s*(\d{1,3})(?=\s|[.,;:/]|$)/giu, '$1 корпус $2');
+  return String(raw || '').replace(/\d{1,3}\s*к\s*\d{1,3}(?=\s|[.,;:/]|$)/giu, ' АДРЕС_КОРПУС ');
 };
