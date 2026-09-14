@@ -24,6 +24,15 @@ v21MaskCorpusNumbers = function v21MaskCorpusNumbersSafe(raw) {
   return String(raw || '').replace(/\d{1,3}\s*к\s*\d{1,3}(?=\s|[.,;:/]|$)/giu, ' АДРЕС_КОРПУС ');
 };
 
+// Prefer 4-8 digit shorthand before short decimal millions so "3500" is
+// consumed as one token and normalized by the frozen money parser to 3.5m.
+v21PriorityBudget = function v21PriorityBudgetSafe(raw) {
+  const text = String(raw || '');
+  const m = text.match(/(?:бюджет\s+)?приоритет(?:ный)?(?:\s+бюджет)?\s*(?:до\s*)?(\d{4,8}|\d{1,3}(?:[.,]\d+)?)(?=\s|[.,;:/]|$)\s*(млн|милл|миллион(?:а|ов)?|тыс|тр|руб(?:лей|ля|\.)?)?/iu);
+  if (!m) return null;
+  return moneyTokenToRub(m[1], m[2] || '');
+};
+
 // The original V2.1 phrase used \w* after "маленьк", which does not consume
 // Cyrillic endings in JavaScript. Apply the intended >=25 m² rule safely here.
 const __v21RegexFixParseRequestBase = parseRequest;
@@ -35,6 +44,21 @@ parseRequest = function v21RegexFixParseRequest(text) {
     out.area = out.area && typeof out.area === 'object' ? out.area : {min:null,max:null,preferred:null};
     if (out.area.min == null) out.area.min = V21_SMALL_STUDIO_MIN_AREA;
     out.smallStudioMinAppliedV21 = V21_SMALL_STUDIO_MIN_AREA;
+  }
+
+  // Re-apply the +300k operating rule with the Cyrillic-safe/full-token parser.
+  const preferredBudget = v21PriorityBudget(text);
+  if (preferredBudget != null && /дороже[^\n]{0,30}(?:тоже\s+)?рассмотр|выше[^\n]{0,30}рассмотр/iu.test(n)) {
+    out.preferredBudgetMaxV21 = preferredBudget;
+    out.budgetFlexV21 = V21_PRIORITY_BUDGET_BUFFER_RUB;
+    out.budgetMax = preferredBudget + V21_PRIORITY_BUDGET_BUFFER_RUB;
+    if (out.typeBudgets && typeof out.typeBudgets === 'object') {
+      for (const t of out.types || []) {
+        if (Number.isFinite(out.typeBudgets[t]) && out.typeBudgets[t] <= preferredBudget) {
+          out.typeBudgets[t] = out.budgetMax;
+        }
+      }
+    }
   }
   return out;
 };
