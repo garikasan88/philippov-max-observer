@@ -6,6 +6,7 @@ on:
       - '.github/workflows/request_match_v2_shadow.yml'
       - 'src/request_match_v2_patch.js'
       - 'src/request_match_v2_hotfix.js'
+      - 'src/request_match_v21_real_requests_hotfix.js'
   workflow_dispatch: {}
 
 permissions:
@@ -46,14 +47,15 @@ jobs:
           npm init -y >/dev/null 2>&1
           npm install --silent --ignore-scripts --omit=optional --no-audit --no-fund webmaxsocket@1.2.7
 
-          python3 - "$GITHUB_WORKSPACE/src/observer_base.yml" "$GITHUB_WORKSPACE/src/request_match_v2_patch.js" "$GITHUB_WORKSPACE/src/request_match_v2_hotfix.js" "$WORKDIR" <<'PY'
+          python3 - "$GITHUB_WORKSPACE/src/observer_base.yml" "$GITHUB_WORKSPACE/src/request_match_v2_patch.js" "$GITHUB_WORKSPACE/src/request_match_v2_hotfix.js" "$GITHUB_WORKSPACE/src/request_match_v21_real_requests_hotfix.js" "$WORKDIR" <<'PY'
           from pathlib import Path
           import sys
 
           src = Path(sys.argv[1]).read_text(encoding='utf-8')
           patch = Path(sys.argv[2]).read_text(encoding='utf-8')
           hotfix = Path(sys.argv[3]).read_text(encoding='utf-8')
-          out_dir = Path(sys.argv[4])
+          real_hotfix = Path(sys.argv[4]).read_text(encoding='utf-8')
+          out_dir = Path(sys.argv[5])
 
           marker_start = "cat > observer.cjs <<'JS'\n"
           marker_end = "\n          JS\n"
@@ -66,7 +68,7 @@ jobs:
           main_marker = "\n          async function main() {"
           if main_marker not in js:
               raise SystemExit('MAIN_INSERT_POINT_NOT_FOUND')
-          js = js.replace(main_marker, "\n" + patch + "\n" + hotfix + "\n" + main_marker, 1)
+          js = js.replace(main_marker, "\n" + patch + "\n" + hotfix + "\n" + real_hotfix + "\n" + main_marker, 1)
 
           old_object_block = """              const objectChat = await discoverChatByExactTitle(client, OBJECT_CHAT_TITLE);\n              if (!objectChat?.id) throw new Error(`OBJECT_CHAT_NOT_FOUND title=${OBJECT_CHAT_TITLE}`);\n              const objectCid = String(objectChat.id);\n              const objectHistory = await client.getHistory(Number(objectCid), Date.now(), HISTORY_BACKWARD, 0);"""
           new_object_block = """              const objectCid = '-75607874388089';\n              console.log(`OBJECT SOURCE RESOLVE: STABLE_ID chat_id=${objectCid}`);\n              const objectHistory = await client.getHistory(Number(objectCid), Date.now(), HISTORY_BACKWARD, 0);"""
