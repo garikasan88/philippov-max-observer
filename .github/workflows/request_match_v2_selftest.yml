@@ -7,6 +7,8 @@ on:
       - '.github/workflows/max_observer_production.yml'
       - 'src/request_match_v2_patch.js'
       - 'src/request_match_v2_hotfix.js'
+      - 'src/request_match_v21_real_requests_hotfix.js'
+      - 'src/request_match_v21_production_overlay.py'
       - 'src/max_observer_production_base.yml'
       - 'src/next_action_lifecycle_overlay.py'
 
@@ -44,6 +46,7 @@ jobs:
           src = Path('src/observer_base.yml').read_text(encoding='utf-8')
           patch = Path('src/request_match_v2_patch.js').read_text(encoding='utf-8')
           hotfix = Path('src/request_match_v2_hotfix.js').read_text(encoding='utf-8')
+          real_hotfix = Path('src/request_match_v21_real_requests_hotfix.js').read_text(encoding='utf-8')
           start_marker = "cat > observer.cjs <<'JS'\n"
           end_marker = "\n          JS\n"
           if start_marker not in src or end_marker not in src:
@@ -56,7 +59,7 @@ jobs:
           main_marker = "\n          async function main() {"
           if main_marker not in js:
               raise SystemExit('MAIN_INSERT_POINT_NOT_FOUND')
-          js = js.replace(main_marker, "\n" + patch + "\n" + hotfix + "\n" + main_marker, 1)
+          js = js.replace(main_marker, "\n" + patch + "\n" + hotfix + "\n" + real_hotfix + "\n" + main_marker, 1)
 
           invoke_marker = "\n          main().catch(error => {"
           invoke = js.rfind(invoke_marker)
@@ -76,6 +79,7 @@ jobs:
               "  parseObservedMessage = __activeParseObservedMessageForFrozenV2;",
               "}",
               "console.log('REQUEST MATCH V2.1: ' + requestMatchV21SelfTest());",
+              "console.log('REQUEST MATCH V2.1 REAL: ' + requestMatchV21RealRequestsSelfTest());",
               "console.log('NEXT ACTION LIFECYCLE: ' + nextActionLifecycleSelfTest());",
               "console.log('REQUEST MATCH V2/V2.1 ONE-SHOT: PASS');",
           ]
@@ -91,20 +95,32 @@ jobs:
           from pathlib import Path
 
           prod = Path('src/max_observer_production_base.yml').read_text(encoding='utf-8')
-          overlay_path = Path('src/next_action_lifecycle_overlay.py')
-          ns = {}
-          exec(compile(overlay_path.read_text(encoding='utf-8'), str(overlay_path), 'exec'), ns)
-          apply_overlay = ns.get('apply_next_action_lifecycle_overlay')
-          if not callable(apply_overlay):
+
+          next_overlay_path = Path('src/next_action_lifecycle_overlay.py')
+          next_ns = {}
+          exec(compile(next_overlay_path.read_text(encoding='utf-8'), str(next_overlay_path), 'exec'), next_ns)
+          apply_next = next_ns.get('apply_next_action_lifecycle_overlay')
+          if not callable(apply_next):
               raise SystemExit('NEXT_ACTION_OVERLAY_FUNCTION_MISSING')
-          effective = apply_overlay(prod)
+          effective = apply_next(prod)
+
+          v21_overlay_path = Path('src/request_match_v21_production_overlay.py')
+          v21_ns = {}
+          exec(compile(v21_overlay_path.read_text(encoding='utf-8'), str(v21_overlay_path), 'exec'), v21_ns)
+          apply_v21 = v21_ns.get('apply_request_match_v21_production_overlay')
+          if not callable(apply_v21):
+              raise SystemExit('V21_PRODUCTION_OVERLAY_FUNCTION_MISSING')
+          effective = apply_v21(effective)
 
           required = [
+              "request_match_v21_real_requests_hotfix.js",
               "const matchView = v21MatchedRequestView(m.request || {}, m.reasons || []);",
               "`Подзапрос: ${matchView.index} из ${matchView.total || '?'}`",
               "clip(matchView.raw || req.raw, 850)",
               "m.reasons.filter(x => !/^SUBREQUEST:\\d+$/u.test(String(x || '').trim()))",
-              "const matchKey = `${cid}|${m.requestMessageId}|${m.objectId}`;",
+              "const legacyMatchKey = v21LegacyMatchKey(m, cid);",
+              "const matchKey = v21CrossGroupMatchKey(m, cid);",
+              "notifiedKeys.add(legacyMatchKey);",
               "nextActionCreate({sourceMatchKey: matchKey})",
               "const nextActionDisplayText = requestAuthor",
               "cursor.nextActions[nextAction.id] = nextAction",
@@ -124,11 +140,10 @@ jobs:
               "type:'MATCH_NOTIFIED'",
               "MATCH NOTIFY CHECKPOINT: PASS",
               "const encryptedMatches = encryptSession(notifyMatches, BOOTSTRAP_RAW);",
-              "const key = matchKey;",
           ]
           missing = [needle for needle in required if needle not in effective]
           if missing:
-              raise SystemExit('PRODUCTION_NEXT_ACTION_HARDENING_MISSING: ' + repr(missing))
+              raise SystemExit('PRODUCTION_V21_HARDENING_MISSING: ' + repr(missing))
 
           forbidden = [
               "nextActionCreate({sourceMatchKey: matchKey, requestAuthor})",
@@ -141,12 +156,15 @@ jobs:
           active = Path('.github/workflows/max_observer_production.yml').read_text(encoding='utf-8')
           active_required = [
               'src/next_action_lifecycle_overlay.py',
+              'src/request_match_v21_production_overlay.py',
               'apply_next_action_lifecycle_overlay',
+              'apply_request_match_v21_production_overlay',
               'NEXT ACTION LIFECYCLE OVERLAY: READY',
+              'REQUEST MATCH V2.1 PRODUCTION OVERLAY: READY',
           ]
           missing_active = [needle for needle in active_required if needle not in active]
           if missing_active:
               raise SystemExit('ACTIVE_PRODUCTION_OVERLAY_WIRING_MISSING: ' + repr(missing_active))
 
-          print('PRODUCTION MATCH + NEXT ACTION PRIVACY/AUDIT/DELIVERY HARDENING: PASS')
+          print('PRODUCTION MATCH + V2.1 REAL REQUEST + NEXT ACTION HARDENING: PASS')
           PY
