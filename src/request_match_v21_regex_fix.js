@@ -16,3 +16,7 @@ v21LandFromHousePhrase = function v21LandFromHousePhraseCyrillicSafe(raw) {
   const v = Number(String(m[1]).replace(',', '.'));
   return Number.isFinite(v) ? v : null;
 };
+
+v21MaskCorpusNumbers = function v21MaskCorpusNumbersSafe(raw) {
+  return String(raw || '').replace(/(\d{1,3})\s*к\s*(\d{1,3})(?=\s|[.,;:/]|$)/giu, '$1 корпус $2');
+};
