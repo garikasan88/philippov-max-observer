@@ -55,7 +55,7 @@ v2ObjectMatchesToken = function v21RealObjectMatchesToken(obj, token) {
 function v21HasNamedLocationCue(raw) {
   const text = String(raw || '');
   return /(?:^|\s)(?:жк|кп|коттеджн(?:ый|ого)\s+пос[её]лок|район|р-?н|мкр|микрорайон|локац(?:ия|ии)|хутор|х\.|пос[её]лок|п\.|станиц(?:а|е|ы)|ст\.|село|деревн(?:я|е|и)|снт|днт)\b/iu.test(text)
-    || /(?:дом|дача|коттедж|участок|квартир[ауеы]?)\s+(?:в|на)\s+[А-ЯЁ][А-ЯЁа-яё-]{3,}/u.test(text);
+    || /(?:[Дд]ом|[Дд]ача|[Кк]оттедж|[Уу]часток|[Кк]вартир[ауеы]?)\s+(?:в|на)\s+[А-ЯЁ][А-ЯЁа-яё-]{3,}/u.test(text);
 }
 
 function v21PriorityBudget(raw) {
