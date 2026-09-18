@@ -13,6 +13,21 @@ const V21_NAMED_COMPLEX_ALIASES = Object.freeze({
   'галактика': ['галактика', 'жк галактика'],
 });
 
+function v21ExtractExplicitComplexNames(raw) {
+  const text = String(raw || '');
+  const out = [];
+  for (const m of text.matchAll(/(?:^|[\s,;:.!?])жк\s+([а-яёa-z0-9][^,\n;:()!?]{0,60})/giu)) {
+    let name = normalizeText(m[1]).trim();
+    // Stop before obvious request criteria when punctuation is omitted.
+    name = name.replace(
+      /\s+(?:до|от|бюджет|цена|налич|ипотек|с\s+ремонт|без\s+ремонт|ремонт|мебел|техник|студи|[1-9]\s*[-–—]?\s*(?:к|ком)|евро\s*[-–—]?\s*[2-9]|этаж|площад)[\s\S]*$/iu,
+      ''
+    ).trim();
+    if (name.length >= 2) out.push(name);
+  }
+  return [...new Set(out)];
+}
+
 const __v21RealExtractComplexesBase = v2ExtractComplexes;
 v2ExtractComplexes = function v21RealExtractComplexes(raw) {
   const out = new Set(__v21RealExtractComplexesBase(raw));
@@ -21,14 +36,9 @@ v2ExtractComplexes = function v21RealExtractComplexes(raw) {
   }
 
   // Any explicit "ЖК <name>" is a HARD named complex even when the name is
-  // absent from the frozen alias table. This prevents an unknown ЖК from
-  // silently degrading to citywide TYPE/PRICE matching.
-  if (typeof extractExplicitJks === 'function') {
-    for (const name of extractExplicitJks(raw)) {
-      const canon = normalizeText(name).trim();
-      if (canon) out.add(canon);
-    }
-  }
+  // absent from the frozen alias table. Use a bounded extractor so request
+  // criteria after the ЖК name never become part of the complex name.
+  for (const name of v21ExtractExplicitComplexNames(raw)) out.add(name);
 
   return [...out];
 };
@@ -322,6 +332,11 @@ function requestMatchV21RealRequestsSelfTest() {
   if (!matchRequestToLiveObject(r, o).match) fail('priority-3750-match');
   o = parseObjectMessage(fake('1к квартира. 35 м2. 3 850 000 руб. ремонт.'));
   if (matchRequestToLiveObject(r, o).match) fail('priority-3850-reject');
+
+  r = parseObservedMessage('Запрос. Евро-2 ЖК Дарград. До 4,6 млн. Не выше 5 этажа.');
+  if (r.kind !== 'REQUEST' || !r.complexesV2?.includes('дарград')) fail('explicit-jk-bounded-name', JSON.stringify(r));
+  o = parseObjectMessage(fake('ЖК Дарград, Новая Адыгея. Евро-2. 33 м2. 4/5 этаж. Современный ремонт. 4 450 000 руб.'));
+  if (!matchRequestToLiveObject(r, o).match) fail('explicit-jk-bounded-positive');
 
   // Regression 18.09.2026: explicit ЖК is HARD. "ЖК Галактика" must never
   // degrade to TYPE/PRICE-only and match ЖК Самолёт.
