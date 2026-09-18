@@ -10,6 +10,7 @@ const V21_PRIORITY_BUDGET_BUFFER_RUB = 300_000;
 const V21_NAMED_COMPLEX_ALIASES = Object.freeze({
   'сказка град': ['сказка град', 'сказка-град'],
   'кп крепость': ['кп крепость', 'коттеджный поселок крепость', 'коттеджный посёлок крепость'],
+  'галактика': ['галактика', 'жк галактика'],
 });
 
 const __v21RealExtractComplexesBase = v2ExtractComplexes;
@@ -18,6 +19,17 @@ v2ExtractComplexes = function v21RealExtractComplexes(raw) {
   for (const [canon, aliases] of Object.entries(V21_NAMED_COMPLEX_ALIASES)) {
     if (aliases.some(a => v2LooseIncludes(raw, a))) out.add(canon);
   }
+
+  // Any explicit "ЖК <name>" is a HARD named complex even when the name is
+  // absent from the frozen alias table. This prevents an unknown ЖК from
+  // silently degrading to citywide TYPE/PRICE matching.
+  if (typeof extractExplicitJks === 'function') {
+    for (const name of extractExplicitJks(raw)) {
+      const canon = normalizeText(name).trim();
+      if (canon) out.add(canon);
+    }
+  }
+
   return [...out];
 };
 
@@ -54,7 +66,9 @@ v2ObjectMatchesToken = function v21RealObjectMatchesToken(obj, token) {
 
 function v21HasNamedLocationCue(raw) {
   const text = String(raw || '');
-  return /(?:^|\s)(?:жк|кп|коттеджн(?:ый|ого)\s+пос[её]лок|район|р-?н|мкр|микрорайон|локац(?:ия|ии)|хутор|х\.|пос[её]лок|п\.|станиц(?:а|е|ы)|ст\.|село|деревн(?:я|е|и)|снт|днт)\b/iu.test(text)
+  // Do not use \b after Cyrillic tokens: JavaScript word-boundary semantics
+  // are ASCII-oriented and can miss "ЖК Галактика" entirely.
+  return /(?:^|[\s,.;:()])(?:жк|кп|коттеджн(?:ый|ого)\s+пос[её]лок|район|р-?н|мкр|микрорайон|локац(?:ия|ии)|хутор|х\.|пос[её]лок|п\.|станиц(?:а|е|ы)|ст\.|село|деревн(?:я|е|и)|снт|днт)(?=$|[\s,.;:()])/iu.test(text)
     || /(?:[Дд]ом|[Дд]ача|[Кк]оттедж|[Уу]часток|[Кк]вартир[ауеы]?)\s+(?:в|на)\s+[А-ЯЁ][А-ЯЁа-яё-]{3,}/u.test(text);
 }
 
@@ -308,6 +322,23 @@ function requestMatchV21RealRequestsSelfTest() {
   if (!matchRequestToLiveObject(r, o).match) fail('priority-3750-match');
   o = parseObjectMessage(fake('1к квартира. 35 м2. 3 850 000 руб. ремонт.'));
   if (matchRequestToLiveObject(r, o).match) fail('priority-3850-reject');
+
+  // Regression 18.09.2026: explicit ЖК is HARD. "ЖК Галактика" must never
+  // degrade to TYPE/PRICE-only and match ЖК Самолёт.
+  r = parseObservedMessage('Запрос СРОЧНО. ЖК Галактика. 1 комнатная, с ремонтом. Наличные до 9 млн. 8(918)136-12-60 Полина');
+  if (r.kind !== 'REQUEST' || !r.complexesV2?.includes('галактика') || r.geoUnresolvedV2) fail('galaktika-parse', JSON.stringify(r));
+  o = parseObjectMessage(fake('ЖК Самолёт 1. Мини 1-к. 28 м2. 11/16 этаж. Ремонт / мебель / техника. 4 600 000 руб.'));
+  v = matchRequestToLiveObject(r, o);
+  if (v.match || v.reason !== 'COMPLEX_MISS') fail('galaktika-vs-samolet-reject', JSON.stringify(v));
+  o = parseObjectMessage(fake('ЖК Галактика. 1-к. 42 м2. Ремонт. 8 500 000 руб.'));
+  if (!matchRequestToLiveObject(r, o).match) fail('galaktika-valid-match');
+
+  // Generic protection: even a ЖК absent from every alias table remains an
+  // exact named complex instead of widening to all of Krasnodar.
+  r = parseObservedMessage('Запрос ЖК Небылица 1к с ремонтом до 8 млн');
+  if (r.kind !== 'REQUEST' || !r.complexesV2?.some(x => x.includes('небылица')) || r.geoUnresolvedV2) fail('unknown-explicit-jk-parse', JSON.stringify(r));
+  o = parseObjectMessage(fake('ЖК Самолёт 1. 1-к. Ремонт. 5 000 000 руб.'));
+  if (matchRequestToLiveObject(r, o).match) fail('unknown-explicit-jk-no-citywide-widen');
 
   // Regression 18.09.2026: "Дом в Копанском" must not match a house in СНТ Авангард.
   r = parseObservedMessage('Запрос: СМОТРИМ ЗАВТРА. Дом в Копанском с ремонтом. Наличка. Бюджет 7млн. 89883890812 Алексей');
