@@ -29,8 +29,33 @@ v2ObjectMatchesComplex = function v21RealObjectMatchesComplex(obj, complex) {
   return aliases.some(a => v2LooseIncludes(corpus, a));
 };
 
+// Real settlement names may be written without "район/посёлок/хутор" labels.
+// Keep them explicit and fail closed: named geography must never silently become GEO=NONE.
+const V21_NAMED_GEO_ALIASES = Object.freeze({
+  'копанской': ['копанской', 'копанском', 'копанского', 'копанскую', 'хутор копанской', 'х копанской'],
+});
+
+const __v21RealExtractGeoBase = v2ExtractGeo;
+v2ExtractGeo = function v21RealExtractGeo(raw) {
+  const out = new Set(__v21RealExtractGeoBase(raw));
+  for (const [canon, aliases] of Object.entries(V21_NAMED_GEO_ALIASES)) {
+    if (aliases.some(a => v2LooseIncludes(raw, a))) out.add(canon);
+  }
+  return [...out];
+};
+
+const __v21RealObjectMatchesTokenBase = v2ObjectMatchesToken;
+v2ObjectMatchesToken = function v21RealObjectMatchesToken(obj, token) {
+  const aliases = V21_NAMED_GEO_ALIASES[token];
+  if (!aliases) return __v21RealObjectMatchesTokenBase(obj, token);
+  const corpus = `${obj?.sourceText || ''} ${obj?.norm || ''} ${obj?.routeCorpus || ''}`;
+  return aliases.some(a => v2LooseIncludes(corpus, a));
+};
+
 function v21HasNamedLocationCue(raw) {
-  return /(?:^|\s)(?:жк|кп|коттеджн(?:ый|ого)\s+пос[её]лок|район|р-?н|мкр|микрорайон|локац(?:ия|ии))\b/iu.test(String(raw || ''));
+  const text = String(raw || '');
+  return /(?:^|\s)(?:жк|кп|коттеджн(?:ый|ого)\s+пос[её]лок|район|р-?н|мкр|микрорайон|локац(?:ия|ии)|хутор|х\.|пос[её]лок|п\.|станиц(?:а|е|ы)|ст\.|село|деревн(?:я|е|и)|снт|днт)\b/iu.test(text)
+    || /(?:дом|дача|коттедж|участок|квартир[ауеы]?)\s+(?:в|на)\s+[А-ЯЁ][А-ЯЁа-яё-]{3,}/u.test(text);
 }
 
 function v21PriorityBudget(raw) {
@@ -283,6 +308,22 @@ function requestMatchV21RealRequestsSelfTest() {
   if (!matchRequestToLiveObject(r, o).match) fail('priority-3750-match');
   o = parseObjectMessage(fake('1к квартира. 35 м2. 3 850 000 руб. ремонт.'));
   if (matchRequestToLiveObject(r, o).match) fail('priority-3850-reject');
+
+  // Regression 18.09.2026: "Дом в Копанском" must not match a house in СНТ Авангард.
+  r = parseObservedMessage('Запрос: СМОТРИМ ЗАВТРА. Дом в Копанском с ремонтом. Наличка. Бюджет 7млн. 89883890812 Алексей');
+  if (r.kind !== 'REQUEST' || !r.geoV2?.includes('копанской') || r.geoUnresolvedV2) fail('kopanskoy-parse', JSON.stringify(r));
+  o = parseObjectMessage(fake('СНТ Авангард, ул. Мичурина. Дом / дача. 34 м2 / 6 сот. Ремонт / мебель / техника. 3 700 000 руб.'));
+  v = matchRequestToLiveObject(r, o);
+  if (v.match || v.reason !== 'GEO_MISS') fail('kopanskoy-vs-avangard-reject', JSON.stringify(v));
+  o = parseObjectMessage(fake('Хутор Копанской. Дом. 90 м2 / 6 сот. Ремонт. 6 500 000 руб.'));
+  if (!matchRequestToLiveObject(r, o).match) fail('kopanskoy-house-match');
+
+  // Unknown natural named geography must fail closed instead of silently widening citywide.
+  r = parseObservedMessage('Запрос: Дом в Неизвестовке с ремонтом. Бюджет 7 млн');
+  if (r.kind !== 'REQUEST' || !r.geoUnresolvedV2) fail('unknown-natural-geo-fail-closed-parse', JSON.stringify(r));
+  o = parseObjectMessage(fake('СНТ Авангард. Дом. 90 м2. Ремонт. 6 500 000 руб.'));
+  v = matchRequestToLiveObject(r, o);
+  if (v.match || v.reason !== 'GEO_UNRESOLVED_FAIL_CLOSED') fail('unknown-natural-geo-reject', JSON.stringify(v));
 
   const m1 = {
     request:{raw:'Запрос 2к ЖК Губернский ремонт до 7млн 89287783090'},
