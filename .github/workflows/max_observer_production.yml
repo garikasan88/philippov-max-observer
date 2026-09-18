@@ -1,6 +1,16 @@
 name: PHILIPPOV MAX OBSERVER — PRODUCTION SENSOR
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/request_match_v2_patch.js'
+      - 'src/request_match_v2_hotfix.js'
+      - 'src/request_match_v21_real_requests_hotfix.js'
+      - 'src/request_match_v21_regex_fix.js'
+      - 'src/request_match_v21_production_overlay.py'
+      - '.github/workflows/max_observer_production.yml'
   workflow_dispatch:
     inputs:
       smoke:
