@@ -4,16 +4,6 @@ on:
   workflow_dispatch: {}
   schedule:
     - cron: "*/10 * * * *"
-  push:
-    branches:
-      - main
-    paths:
-      - 'src/request_match_v2_patch.js'
-      - 'src/request_match_v2_hotfix.js'
-      - 'src/request_match_v21_real_requests_hotfix.js'
-      - 'src/request_match_v21_regex_fix.js'
-      - 'src/request_match_v21_production_overlay.py'
-      - '.github/workflows/observer.yml'
 
 permissions:
   contents: read
